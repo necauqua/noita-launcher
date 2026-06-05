@@ -1,0 +1,55 @@
+[package]
+name = "noita-launcher"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+# connecting to steam and downloading stuff
+steam-vent = "0.5.0"
+steam-vent-proto = "0.5.2"
+reqwest = { version = "0.13.3", features = ["rustls"] }
+bytes = "1.11.1"
+sha1 = "0.11.0"
+
+# parsing
+base64 = "0.22"
+steam-vdf-parser = "0.1.1"
+byteorder = "1.5.0"
+
+# decompressing depots and other downloads
+flate2 = "1.1.9"
+tar = "0.4.46"
+lzma-rs = { version = "0.3.0", features = ["stream"] }
+zstd = "0.13.3"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+# decrypting depots
+aes = "0.9.0"
+ecb = "0.2.0"
+cbc = "0.2.0"
+
+# cli
+clap = { version = "4.6.1", features = ["derive"] }
+inquire = "0.9.4"
+indicatif = "0.18.4"
+owo-colors = { version = "4.3.0", features = ["supports-colors"] }
+
+# app
+dirs = { version = "6.0.0", default-features = false }
+keyring = "4.0.0"
+keyring-core = "1.0.0"
+fastrand = "2.4.1"
+
+# generic framework stuff
+tokio = { version = "1.52.3", features = ["full"] }
+eyre = "0.6.12"
+color-eyre = "0.6.5"
+thiserror = "2.0.18"
+futures = "0.3.32"
+tracing = { version = "0.1.44", features = ["log"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "local-time"] }
+
+# config files
+serde = { version = "1.0.228", default-features = false }
+toml = { version = "1.1.2", features = ["preserve_order", "serde"] }
