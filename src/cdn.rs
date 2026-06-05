@@ -61,7 +61,7 @@ impl CdnDownloader {
                 .split_first()
                 .ok_or_eyre("No CDN could fulfill the download")?;
 
-            let url = format!("https://{host}/{url_path}",);
+            let url = format!("https://{host}/{url_path}");
 
             let e = match self.try_download(&url, size_hint).await {
                 Ok(bytes) => match postprocess(bytes).await {
@@ -79,7 +79,7 @@ impl CdnDownloader {
             }
             attempts = ATTEMPTS_PER_HOST;
             hosts = rest;
-            tracing::warn!(error = ?e, "failed to download from {url}, retrying");
+            tracing::warn!(error = ?e, "failed to download from {url}, trying next host");
         }
     }
 }

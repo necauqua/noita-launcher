@@ -1,5 +1,4 @@
 use std::io::ErrorKind;
-use std::io::Write;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -27,8 +26,9 @@ use tokio::process::Command;
 const APP_ID: u32 = 881100;
 const DEPOT_ID: u32 = 881101;
 
-#[derive(Default)]
-pub struct SteamTwoFactor;
+pub struct SteamTwoFactor {
+    printer: Printer,
+}
 
 impl AuthConfirmationHandler for SteamTwoFactor {
     async fn handle_confirmation(
@@ -44,9 +44,10 @@ impl AuthConfirmationHandler for SteamTwoFactor {
             .find(|m| m.class() == ConfirmationMethodClass::Confirmation)
         {
             if method.confirmation_type() == "device confirmation" {
-                println!("[!!!] Open SteamGuard");
+                self.printer.hint("[!!!] Open SteamGuard");
             } else {
-                println!("[!!!] A confirmation link was sent to your email");
+                self.printer
+                    .hint("[!!!] A confirmation link was sent to your email");
             }
             return Some(ConfirmationAction::None);
         }
@@ -56,29 +57,26 @@ impl AuthConfirmationHandler for SteamTwoFactor {
                 continue;
             };
             match token_type {
-                GuardTokenType::Email => {
-                    println!("A confirmation code was sent to your email")
-                }
-                GuardTokenType::Device => {
-                    println!("A confirmation code was sent to your device")
-                }
+                GuardTokenType::Email => self
+                    .printer
+                    .hint("A confirmation code was sent to your email"),
+                GuardTokenType::Device => self
+                    .printer
+                    .hint("A confirmation code was sent to your device"),
             }
-            print!("Code: ");
-            std::io::stdout().flush().ok()?;
 
-            let mut code = String::with_capacity(16);
-            std::io::stdin().read_line(&mut code).ok()?;
+            let mut code = match inquire::Text::new("Code:").prompt() {
+                Ok(c) => c,
+                Err(_) => return Some(ConfirmationAction::Abort), // meh
+            };
+
             code.truncate(code.trim().len());
 
-            return if code.is_empty() {
-                Some(ConfirmationAction::Abort)
-            } else {
-                // ugly hack for now because there's no way to create a SteamGuardToken 🤦
-                //  surely they'll fix this
-                let token = unsafe { std::mem::transmute::<String, SteamGuardToken>(code) };
+            // ugly hack for now because there's no way to create a SteamGuardToken 🤦
+            //  surely they'll fix this
+            let token = unsafe { std::mem::transmute::<String, SteamGuardToken>(code) };
 
-                Some(ConfirmationAction::GuardToken(token, token_type))
-            };
+            return Some(ConfirmationAction::GuardToken(token, token_type));
         }
         None
     }
@@ -96,13 +94,12 @@ impl Printer {
         Self(p)
     }
 
-    fn hint(&self, msg: impl Into<String>) -> eyre::Result<()> {
-        self.0.println(
-            msg.into()
-                .if_supports_color(Stream::Stderr, |t| t.dimmed())
-                .to_string(),
-        )?;
-        Ok(())
+    fn hint(&self, msg: impl Into<String>) {
+        let colored = msg
+            .into()
+            .if_supports_color(Stream::Stderr, |t| t.dimmed())
+            .to_string();
+        self.0.println(colored).unwrap();
     }
 
     fn bar(&mut self, len: u64) -> indicatif::ProgressBar {
@@ -168,14 +165,15 @@ impl NoitaLauncher {
                 return Err(eyre!("Not logged in")
                     .suggestion("Run `noita login` to login with your Steam account"));
             }
-            data => {
+            data => async {
                 let data = data?;
                 let (account, token) = data
                     .split_once(':')
-                    .ok_or_eyre("Invalid cretential stored in keyring")
-                    .suggestion("Run `noita logout && noita login` to fix this")?;
-                Connection::access(&ServerList::discover().await?, account, token).await?
+                    .ok_or_eyre("Invalid cretential stored in keyring")?;
+                eyre::Ok(Connection::access(&ServerList::discover().await?, account, token).await?)
             }
+            .await
+            .suggestion("Run `noita logout && noita login` to fix this")?,
         };
 
         Ok(self
@@ -190,10 +188,10 @@ impl NoitaLauncher {
         }
     }
 
-    async fn login(&mut self, _args: LoginArgs) -> eyre::Result<()> {
+    async fn login(&mut self, args: LoginArgs) -> eyre::Result<()> {
         let entry = Self::keyring_entry()?;
 
-        let username = match _args.username {
+        let username = match args.username {
             Some(u) => u,
             None => match inquire::Text::new("Steam username:").prompt() {
                 Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
@@ -203,7 +201,7 @@ impl NoitaLauncher {
             },
         };
 
-        let password = if _args.stdin_password {
+        let password = if args.stdin_password {
             let mut buf = String::new();
             std::io::stdin().read_line(&mut buf)?;
             buf
@@ -221,7 +219,9 @@ impl NoitaLauncher {
             username.trim(),
             password.trim(),
             FileGuardDataStore::user_cache(),
-            SteamTwoFactor,
+            SteamTwoFactor {
+                printer: self.printer.clone(),
+            },
         )
         .await
         {
@@ -235,17 +235,17 @@ impl NoitaLauncher {
 
         entry.set_password(&format!("{username}:{token}"))?;
 
-        self.printer.hint("Successfully logged in")?;
+        self.printer.hint("Successfully logged in");
 
         Ok(())
     }
 
     async fn logout(&mut self) -> eyre::Result<()> {
         match Self::keyring_entry()?.delete_credential() {
-            Err(keyring_core::Error::NoEntry) => self.printer.hint("Was not logged in")?,
+            Err(keyring_core::Error::NoEntry) => self.printer.hint("Was not logged in"),
             e => {
                 e?;
-                self.printer.hint("Logged out")?;
+                self.printer.hint("Logged out");
             }
         };
         self.steam = None;
@@ -261,7 +261,7 @@ impl NoitaLauncher {
                     .suggestion("run `noita new` first"));
             }
             self.printer
-                .hint("Default instance 'main' does not exist, setting it up..")?;
+                .hint("Default instance 'main' does not exist, setting it up..");
             self.new_instance(NewArgs {
                 name: args.instance,
                 fetch: FetchArgs::default(),
@@ -374,10 +374,10 @@ impl NoitaLauncher {
                 .bar(download_size)
                 .with_prefix("Downloading chunks");
             downloader.prefetch(bar).await?;
-            self.printer.hint("Downloaded missing chunks")?;
+            self.printer.hint("Downloaded missing chunks");
         } else {
             self.printer
-                .hint("All chunks were already cached, no download was needed")?;
+                .hint("All chunks were already cached, no download was needed");
         }
 
         Ok(())
@@ -392,7 +392,7 @@ impl NoitaLauncher {
                 "[{}/{len}] Prefetching version '{}'",
                 i + 1,
                 version.title,
-            ))?;
+            ));
             self.prefetch(FetchArgs {
                 manifest: Some(version.manifest),
                 branch: version.branch,
@@ -423,7 +423,7 @@ impl NoitaLauncher {
 
         if download_size == 0 {
             self.printer
-                .hint("All chunks already cached, no download needed")?;
+                .hint("All chunks already cached, no download needed");
         }
 
         let temp_path = self.app_dir.join("temp").join(format!(
@@ -486,7 +486,7 @@ impl NoitaLauncher {
 
         if !any {
             self.printer
-                .hint("No instances found, run `noita new` to create one")?;
+                .hint("No instances found, run `noita new` to create one");
         }
 
         Ok(())
@@ -512,7 +512,7 @@ impl NoitaLauncher {
 
         if !any {
             self.printer
-                .hint("No saves found, run an instance (with `noita run`)")?;
+                .hint("No saves found, run an instance (with `noita run`)");
         }
 
         Ok(())
