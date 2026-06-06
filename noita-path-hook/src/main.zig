@@ -123,45 +123,47 @@ fn patchIat(targetDll: []const u8, targetName: []const u8, replacement: anytype)
         return error.NoImportDir;
     }
 
-    var desc: [*]std.coff.ImportDirectoryEntry = @ptrCast(@alignCast(base + dir.virtual_address));
+    const desc = findImportDir(base, dir.virtual_address, targetDll) orelse return error.DllNotImported;
+    if (desc.import_lookup_table_rva == 0) {
+        return error.NoImportLookupTable;
+    }
 
+    const slot = findImportSlot(base, desc, targetName) orelse return error.FunctionNotImported;
+
+    var prot: win.PAGE = .{};
+    if (!VirtualProtect(slot, @sizeOf(usize), .{ .READWRITE = true }, &prot).toBool()) {
+        return error.VirtualProtectFailed;
+    }
+    defer _ = VirtualProtect(slot, @sizeOf(usize), prot, &prot);
+
+    const orig = slot.*;
+    slot.* = @intFromPtr(replacement);
+    return @ptrFromInt(orig);
+}
+
+fn findImportDir(base: [*]u8, table_rva: u32, targetDll: []const u8) ?*std.coff.ImportDirectoryEntry {
+    var desc: [*]std.coff.ImportDirectoryEntry = @ptrCast(@alignCast(base + table_rva));
     while (desc[0].name_rva != 0) : (desc += 1) {
         const dll = std.mem.span(@as([*:0]const u8, @ptrCast(base + desc[0].name_rva)));
-
-        if (!std.ascii.eqlIgnoreCase(dll, targetDll)) {
-            continue;
+        if (std.ascii.eqlIgnoreCase(dll, targetDll)) {
+            return &desc[0];
         }
-
-        const lookup_rva =
-            if (desc[0].import_lookup_table_rva != 0)
-                desc[0].import_lookup_table_rva
-            else
-                desc[0].import_address_table_rva;
-
-        const lookup: [*]u32 = @ptrCast(@alignCast(base + lookup_rva));
-        const iat: [*]usize = @ptrCast(@alignCast(base + desc[0].import_address_table_rva));
-
-        var i: usize = 0;
-        while (lookup[i] != 0) : (i += 1) {
-            const by_name = std.coff.ImportLookupEntry32.getImportByName(lookup[i]) orelse continue;
-            // name table entry: u16 Hint, then the ASCII name
-            const name = std.mem.span(@as([*:0]const u8, @ptrCast(base + by_name.name_table_rva + 2)));
-            if (!std.mem.eql(u8, name, targetName)) {
-                continue;
-            }
-
-            const slot = &iat[i];
-            var prot: win.PAGE = .{};
-            if (!VirtualProtect(slot, @sizeOf(usize), .{ .READWRITE = true }, &prot).toBool()) {
-                return error.VirtualProtectFailed;
-            }
-            defer _ = VirtualProtect(slot, @sizeOf(usize), prot, &prot);
-
-            const orig = slot.*;
-            slot.* = @intFromPtr(replacement);
-            return @ptrFromInt(orig);
-        }
-        return error.FunctionNotImported;
     }
-    return error.DllNotImported;
+    return null;
+}
+
+fn findImportSlot(base: [*]u8, desc: *std.coff.ImportDirectoryEntry, targetName: []const u8) ?*usize {
+    const lookup: [*]u32 = @ptrCast(@alignCast(base + desc.import_lookup_table_rva));
+    const iat: [*]usize = @ptrCast(@alignCast(base + desc.import_address_table_rva));
+
+    var i: usize = 0;
+    while (lookup[i] != 0) : (i += 1) {
+        const by_name = std.coff.ImportLookupEntry32.getImportByName(lookup[i]) orelse continue;
+        const entry: *std.coff.ImportHintNameEntry = @ptrCast(@alignCast(base + by_name.name_table_rva));
+        const name = std.mem.span(@as([*:0]const u8, @ptrCast(&entry.name)));
+        if (std.mem.eql(u8, name, targetName)) {
+            return &iat[i];
+        }
+    }
+    return null;
 }
