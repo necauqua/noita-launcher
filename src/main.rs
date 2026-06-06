@@ -2,7 +2,7 @@ use clap::Parser;
 use color_eyre::Section;
 use eyre::OptionExt;
 use inquire::InquireError;
-use noita_launcher::{launcher::NoitaLauncher, printer::Printer};
+use noita_launcher::{error::UserError, launcher::NoitaLauncher, printer::Printer};
 
 /// Manage multiple isolated Noita instances, each pinned to a specific game version.
 ///
@@ -37,6 +37,8 @@ struct RunArgs {
     /// Save slot to use
     #[clap(default_value = "main")]
     save: String,
+    #[clap(short, long)]
+    force: bool,
 }
 
 /// Create a new instance by downloading a specific Noita version from Steam depots.
@@ -103,18 +105,61 @@ enum Subcommand {
     Saves,
 }
 
-// The folder setup is the following as of now:
-//   cache_dir/
-//     chunks/xy/z... - chunk cache, steam depot chunks organized by first 2 chars of sha1
-//     manifests/<manifest_id> - steam manifest cache
-//
-//   app_dir/
-//     noita-path-hook.dll
-//     noita-trampoline.exe
-//     wineprefix/ - WINEPREFIX on linux
-//     temp/<name>.<random>/ - temporary instance dirs used during download
-//     instances/<name>/.. - instance dir, cwd for a particular Noita version
-//     saves/<name>/.. - a single save dir
+async fn dispatch_cli(subcommand: Subcommand, mut launcher: NoitaLauncher) -> eyre::Result<()> {
+    match subcommand {
+        Subcommand::Login(args) => {
+            let username = match args.username {
+                Some(u) => u,
+                None => match inquire::Text::new("Steam username:").prompt() {
+                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                        return Ok(());
+                    }
+                    u => u?,
+                },
+            };
+
+            let password = if args.stdin_password {
+                let mut buf = String::new();
+                std::io::stdin().read_line(&mut buf)?;
+                buf
+            } else {
+                match inquire::Password::new("Steam password:").prompt() {
+                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                        return Ok(());
+                    }
+                    u => u?,
+                }
+            };
+            launcher.login(username.trim(), password.trim()).await?
+        }
+        Subcommand::Logout => launcher.logout().await?,
+        Subcommand::Run(args) => {
+            launcher
+                .run_instance(&args.instance, &args.save, args.force)
+                .await?
+        }
+        Subcommand::New(args) => {
+            launcher
+                .new_instance(
+                    &args.name,
+                    args.fetch.manifest,
+                    args.fetch.branch.as_deref(),
+                    args.fetch.validate,
+                )
+                .await?
+        }
+        Subcommand::Prefetch(args) => {
+            launcher
+                .prefetch(args.manifest, args.branch.as_deref(), args.validate)
+                .await?
+        }
+        Subcommand::PrefetchAll(args) => launcher.prefetch_all(args.validate).await?,
+        Subcommand::Remove(args) => launcher.remove_instance(&args.name).await?,
+        Subcommand::List => launcher.list_instances().await?,
+        Subcommand::Saves => launcher.list_saves().await?,
+    }
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -158,56 +203,19 @@ async fn main() -> eyre::Result<()> {
     };
 
     let printer = Printer::new(args.quiet);
-    let mut launcher = NoitaLauncher::new(app_dir, trampoline, hook_dll, cache_dir, printer);
+    let launcher = NoitaLauncher::new(app_dir, trampoline, hook_dll, cache_dir, printer.clone());
 
-    match subcommand {
-        Subcommand::Login(args) => {
-            let username = match args.username {
-                Some(u) => u,
-                None => match inquire::Text::new("Steam username:").prompt() {
-                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-                        return Ok(());
-                    }
-                    u => u?,
-                },
-            };
-
-            let password = if args.stdin_password {
-                let mut buf = String::new();
-                std::io::stdin().read_line(&mut buf)?;
-                buf
-            } else {
-                match inquire::Password::new("Steam password:").prompt() {
-                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-                        return Ok(());
-                    }
-                    u => u?,
+    match dispatch_cli(subcommand, launcher).await {
+        Ok(()) => Ok(()),
+        Err(e) => match e.downcast::<UserError>() {
+            Ok(user_error) => {
+                printer.error(format!("Error: {user_error}"));
+                if let Some(hint) = user_error.hint {
+                    printer.hint(format!("\n\nHint: {hint}\n"));
                 }
-            };
-            launcher.login(username.trim(), password.trim()).await?
-        }
-        Subcommand::Logout => launcher.logout().await?,
-        Subcommand::Run(args) => launcher.run_instance(&args.instance, &args.save).await?,
-        Subcommand::New(args) => {
-            launcher
-                .new_instance(
-                    &args.name,
-                    args.fetch.manifest,
-                    args.fetch.branch.as_deref(),
-                    args.fetch.validate,
-                )
-                .await?
-        }
-        Subcommand::Prefetch(args) => {
-            launcher
-                .prefetch(args.manifest, args.branch.as_deref(), args.validate)
-                .await?
-        }
-        Subcommand::PrefetchAll(args) => launcher.prefetch_all(args.validate).await?,
-        Subcommand::Remove(args) => launcher.remove_instance(&args.name).await?,
-        Subcommand::List => launcher.list_instances().await?,
-        Subcommand::Saves => launcher.list_saves().await?,
+                std::process::exit(1);
+            }
+            Err(e) => Err(e),
+        },
     }
-
-    Ok(())
 }

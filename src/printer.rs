@@ -1,5 +1,5 @@
 use indicatif::ProgressStyle;
-use owo_colors::{OwoColorize as _, Stream};
+use owo_colors::{OwoColorize as _, Stream, Style};
 
 #[derive(Clone)]
 pub struct Printer(indicatif::MultiProgress);
@@ -17,6 +17,22 @@ impl Printer {
         let colored = msg
             .into()
             .if_supports_color(Stream::Stderr, |t| t.dimmed())
+            .to_string();
+        self.0.println(colored).unwrap();
+    }
+
+    pub fn warn(&self, msg: impl Into<String>) {
+        let colored = msg
+            .into()
+            .if_supports_color(Stream::Stderr, |t| t.style(Style::new().dimmed().yellow()))
+            .to_string();
+        self.0.println(colored).unwrap();
+    }
+
+    pub fn error(&self, msg: impl Into<String>) {
+        let colored = msg
+            .into()
+            .if_supports_color(Stream::Stderr, |t| t.style(Style::new().bold().red()))
             .to_string();
         self.0.println(colored).unwrap();
     }

@@ -1,7 +1,7 @@
 use std::{io::ErrorKind, path::PathBuf};
 
 use color_eyre::Section;
-use eyre::{Context, OptionExt, bail, eyre};
+use eyre::{Context, OptionExt};
 use keyring_core::Entry;
 use steam_vent::{
     Connection, ConnectionError, ServerList,
@@ -11,7 +11,7 @@ use steam_vent::{
     },
 };
 
-use crate::{download::InstanceDownloader, printer::Printer, steam::Steam};
+use crate::{download::InstanceDownloader, meta::Save, printer::Printer, steam::Steam, user_bail};
 
 pub struct SteamTwoFactor {
     printer: Printer,
@@ -69,6 +69,21 @@ impl AuthConfirmationHandler for SteamTwoFactor {
     }
 }
 
+// The folder setup is the following as of now:
+//   cache_dir/
+//     chunks/xy/z... - chunk cache, steam depot chunks organized by first 2 chars of sha1
+//     manifests/<manifest_id> - steam manifest cache
+//
+//   app_dir/
+//     noita-path-hook.dll
+//     noita-trampoline.exe
+//     wineprefix/ - WINEPREFIX on linux
+//     temp/<name>.<random>/ - temporary instance dirs used during download
+//     instances/<name>/.. - instance dir, cwd for a particular Noita version
+//     saves/<name>/.. - a single save dir
+//       meta.toml - our per-save settings
+//       Nolla_Games_Noita/.. - Noita seed the save folder as the appdata, so it uses this folder
+
 pub struct NoitaLauncher {
     app_dir: PathBuf,
     trampoline: PathBuf,
@@ -119,18 +134,24 @@ impl NoitaLauncher {
         let entry = Self::keyring_entry()?;
         let connection = match entry.get_password() {
             Err(keyring_core::Error::NoEntry) => {
-                return Err(eyre!("Not logged in")
-                    .suggestion("Run `noita login` to login with your Steam account"));
+                user_bail!(
+                    "Not logged in",
+                    hint = "Run `noita login` to login with your Steam account",
+                );
             }
-            data => async {
-                let data = data?;
-                let (account, token) = data
-                    .split_once(':')
-                    .ok_or_eyre("Invalid cretential stored in keyring")?;
-                eyre::Ok(Connection::access(&ServerList::discover().await?, account, token).await?)
+            data => {
+                async {
+                    let data = data?;
+                    let (account, token) = data
+                        .split_once(':')
+                        .ok_or_eyre("Invalid cretential stored in keyring")
+                        .suggestion("Run `noita logout && noita login` to fix this")?;
+                    eyre::Ok(
+                        Connection::access(&ServerList::discover().await?, account, token).await?,
+                    )
+                }
+                .await?
             }
-            .await
-            .suggestion("Run `noita logout && noita login` to fix this")?,
         };
 
         Ok(self
@@ -186,20 +207,58 @@ impl NoitaLauncher {
         Ok(())
     }
 
-    pub async fn run_instance(&mut self, instance: &str, save: &str) -> eyre::Result<()> {
+    pub async fn run_instance(
+        &mut self,
+        instance: &str,
+        save: &str,
+        force: bool,
+    ) -> eyre::Result<()> {
         let instance_dir = self.app_dir.join("instances").join(instance);
 
         if !tokio::fs::try_exists(&instance_dir).await? {
             if instance != "main" {
-                return Err(eyre!("instance '{}' does not exist", instance)
-                    .suggestion("run `noita new` first"));
+                user_bail!(
+                    "Instance '{instance}' does not exist",
+                    hint = "Run `noita new` first",
+                );
             }
             self.printer
                 .hint("Default instance 'main' does not exist, setting it up..");
             self.new_instance(instance, None, None, false).await?;
         }
         let save_path = self.app_dir.join("saves").join(save);
-        tokio::fs::create_dir_all(&save_path).await?;
+        tokio::fs::create_dir_all(&save_path)
+            .await
+            .wrap_err_with(|| format!("Creating dir ({})", save_path.display()))?;
+
+        let meta_path = save_path.join("meta.toml");
+
+        if let Some(mut meta) = Save::read(&meta_path).await? {
+            if meta.instance != instance {
+                if force {
+                    meta.instance = instance.into();
+                    meta.write(&meta_path).await?;
+                    self.printer.warn(format!(
+                        "Overriding save '{save}' to be associated with instance '{instance}' (was associated with '{}')", meta.instance
+                    ));
+                } else {
+                    user_bail!(
+                        "Save '{save}' is associated with a different instance",
+                        hint = "Use `noita run -f/--force` to ignore this check (this will override the associated instance)",
+                    );
+                }
+            }
+        } else {
+            self.printer.warn(format!(
+                "Save {save} did not have meta.toml, creating one associated with '{instance}'"
+            ));
+            crate::meta::Save {
+                instance: instance.into(),
+                description: None,
+            }
+            .write(&meta_path)
+            .await?
+        }
 
         let noita_args = ["-no_logo_splashes"];
 
@@ -211,8 +270,7 @@ impl NoitaLauncher {
                 .arg(save_path)
                 .args(noita_args)
                 .current_dir(instance_dir)
-                .spawn()
-                .note("Running on non-Windows requires umu-launcher to be installed (umu-run in PATH)")?
+                .spawn()?
                 .wait()
                 .await?;
         }
@@ -239,6 +297,7 @@ impl NoitaLauncher {
                 .args(noita_args)
                 .current_dir(instance_dir)
                 .spawn()
+                .wrap_err("Running the game with umu-run")
                 .note("Running on non-Windows requires umu-launcher to be installed (umu-run in PATH)")?
                 .wait()
                 .await?;
@@ -258,7 +317,7 @@ impl NoitaLauncher {
 
         let instance_path = instances_path.join(name);
         if tokio::fs::try_exists(&instance_path).await? {
-            bail!("instance '{}' already exists", name);
+            user_bail!("Instance '{name}' already exists");
         }
 
         let (size, downloader) = self.setup_downloader(manifest, branch).await?;
@@ -292,7 +351,7 @@ impl NoitaLauncher {
 
         if tokio::fs::try_exists(&instance_path).await? {
             tokio::fs::remove_dir_all(&temp_path).await?;
-            bail!("instance '{name}' was created during the download, aborting",);
+            user_bail!("Instance '{name}' was created during the download, aborting",);
         }
         tokio::fs::rename(temp_path, instance_path).await?;
 
@@ -387,7 +446,7 @@ impl NoitaLauncher {
     pub async fn remove_instance(&mut self, name: &str) -> eyre::Result<()> {
         let instance_dir = self.app_dir.join("instances").join(name);
         if !tokio::fs::try_exists(&instance_dir).await? {
-            bail!("instance '{name}' does not exist");
+            user_bail!("Instance '{name}' does not exist");
         }
 
         tokio::fs::remove_dir_all(instance_dir).await?;
