@@ -56,10 +56,6 @@ pub struct CurrentRelease {
     pub branches: Vec<Branch>,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("access denied")]
-pub struct AccessDenied;
-
 impl Steam {
     pub fn new(conn: Connection, manifest_cache: PathBuf) -> Self {
         Self {
@@ -232,13 +228,13 @@ impl Steam {
         app_id: u32,
         depot_id: u32,
         manifest: u64,
-        branch: Option<String>,
+        branch: Option<&str>,
     ) -> Result<u64> {
         let mut req = CContentServerDirectory_GetManifestRequestCode_Request::new();
         req.set_app_id(app_id);
         req.set_depot_id(depot_id);
         req.set_manifest_id(manifest);
-        req.app_branch = branch;
+        req.app_branch = branch.map(|s| s.to_owned());
 
         let resp = self.conn.service_method(req).await?;
 
@@ -254,7 +250,7 @@ impl Steam {
         app_id: u32,
         depot: &Depot,
         manifest: u64,
-        branch: Option<String>,
+        branch: Option<&str>,
     ) -> Result<(ContentManifestMetadata, ContentManifestPayload)> {
         let cache_entry = self.manifest_cache.join(manifest.to_string());
         tokio::fs::create_dir_all(&self.manifest_cache).await?;
