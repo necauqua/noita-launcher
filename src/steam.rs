@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::io::Read;
 use std::path::PathBuf;
@@ -38,6 +39,7 @@ use crate::cdn::CdnDownloader;
 pub struct Steam {
     conn: Connection,
     cdn_servers: Option<Arc<[String]>>,
+    depot_cache: HashMap<(u32, u32), Depot>,
     http: reqwest::Client,
     manifest_cache: PathBuf,
 }
@@ -63,6 +65,7 @@ impl Steam {
         Self {
             conn,
             cdn_servers: None,
+            depot_cache: Default::default(),
             http: Client::new(),
             manifest_cache,
         }
@@ -114,7 +117,11 @@ impl Steam {
         Ok(CurrentRelease { branches })
     }
 
-    pub async fn get_depot(&self, app_id: u32, depot_id: u32) -> Result<Depot> {
+    pub async fn get_depot(&mut self, app_id: u32, depot_id: u32) -> Result<Depot> {
+        if let Some(depot) = self.depot_cache.get(&(app_id, depot_id)) {
+            return Ok(depot.clone());
+        }
+
         let mut req = CMsgClientGetDepotDecryptionKey::new();
         req.set_app_id(app_id);
         req.set_depot_id(depot_id);
@@ -126,13 +133,17 @@ impl Steam {
             bail!("Failed to get depot decryption key: {res:?}");
         }
 
-        Ok(Depot {
+        let depot = Depot {
             id: depot_id,
             key: resp
                 .depot_encryption_key()
                 .try_into()
                 .wrap_err("Unexpected depot key length")?,
-        })
+        };
+
+        self.depot_cache.insert((app_id, depot_id), depot.clone());
+
+        Ok(depot)
     }
 
     pub async fn get_cdn_hosts(&mut self) -> Result<Arc<[String]>> {
