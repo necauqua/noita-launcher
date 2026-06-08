@@ -180,20 +180,16 @@ async fn main() -> eyre::Result<()> {
     let trampoline = app_dir.join("noita-trampoline.exe");
     let hook_dll = app_dir.join("noita-path-hook.dll");
 
-    if !trampoline.exists() {
-        tokio::fs::write(
-            &trampoline,
-            include_bytes!(concat!(env!("OUT_DIR"), "/noita-trampoline.exe")),
-        )
-        .await?;
-    }
-    if !hook_dll.exists() {
-        tokio::fs::write(
-            &hook_dll,
-            include_bytes!(concat!(env!("OUT_DIR"), "/noita-path-hook.dll")),
-        )
-        .await?;
-    }
+    tokio::fs::write(
+        &trampoline,
+        include_bytes!(concat!(env!("OUT_DIR"), "/noita-trampoline.exe")),
+    )
+    .await?;
+    tokio::fs::write(
+        &hook_dll,
+        include_bytes!(concat!(env!("OUT_DIR"), "/noita-path-hook.dll")),
+    )
+    .await?;
 
     let args = Args::parse();
 
