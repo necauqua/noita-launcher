@@ -1,12 +1,12 @@
 .{
-    .name = .noita_trampoline,
-    .version = "0.16.0",
+    .name = .noita_patcher,
+    .version = "0.1.0",
+    .fingerprint = 0x58c69d9bb71cc77c,
     .dependencies = .{
         .win32 = .{
             .url = "git+https://github.com/marlersoft/zigwin32#ec98bb4d9eea532320a8551720a9e3ec6de64994",
             .hash = "win32-25.0.28-preview-mX5pFWMt5QPTVIGh3r2-OpPunpcCCjApyRbA6Zn6WALH",
         },
     },
-    .paths = .{""},
-    .fingerprint = 0xd47e1cff82e526f0,
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

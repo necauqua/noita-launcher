@@ -19,17 +19,16 @@ ease.
   [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher)
   (`umu-run`).
 
-Two small Zig subprojects handle the instance isolation at the process level:
+A Zig subproject, [`noita-patcher`](noita-patcher/README.md), handles the
+instance isolation at the process level by producing two artifacts:
 
-- [`noita-path-hook`](noita-path-hook/README.md) — a 32-bit Windows DLL injected
-  into each Noita process that redirects save path lookups to the per-instance
-  directory.
-- [`noita-trampoline`](noita-trampoline/README.md) — a 32-bit Windows executable
-  that spawns `noita.exe` suspended, injects the hook DLL, then resumes the
-  game.
+- `noita-path-hook.dll` — a 32-bit Windows DLL injected into each Noita process
+  that redirects save path lookups to the per-instance directory.
+- `noita-trampoline.exe` — a 32-bit Windows executable that spawns `noita.exe`
+  suspended, injects the hook DLL, then resumes the game.
 
-Both are compiled by `build.rs` via `zig build` and embedded into the launcher
-binary; they are extracted to the data directory on first run.
+It is compiled by `build.rs` via `zig build` and the artifacts are embedded into
+the launcher binary; they are written into the data directory on startup.
 
 ### Why Zig
 
@@ -44,23 +43,20 @@ quite clunky in Rust, while in Zig its quite natural.
 ## Building
 
 Requires [Rust](https://rustup.rs/) 1.92.0+ and [Zig](https://ziglang.org/)
-0.16.0 (for the two bundled subprojects).
+0.16.0.
 
 ```sh
 cargo build # --release
 ```
-
-The build script compiles and embeds `noita-trampoline` and `noita-path-hook`
-automatically.
 
 ## Known versions
 
 The embedded `src/manifests.toml` contains a catalogue of historical Noita depot
 manifests going back to the initial release on 24 September 2019, manually
 scraped from [SteamDB](https://steamdb.info/depot/881101/manifests/) - btw
-unrelated I donated a copy of Noita to their bot. This list is only used by
-`prefetch-all` — any manifest ID can be passed directly to `new` or `prefetch`
-to create or cache an arbitrary version.
+totally unrelated, I donated a copy of Noita to their bot. This list is only
+used by `prefetch-all` — any manifest ID can be passed directly to `new` or
+`prefetch` to create or cache an arbitrary version.
 
 ## AI use
 
