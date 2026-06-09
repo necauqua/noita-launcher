@@ -77,8 +77,9 @@ struct FetchAllArgs {
 /// Delete an instance directory.
 #[derive(clap::Parser)]
 struct RemoveArgs {
-    /// Name of the instance to delete
-    name: String,
+    /// Names of the instances to delete
+    #[clap(required = true)]
+    names: Vec<String>,
 }
 
 #[derive(clap::Subcommand)]
@@ -146,7 +147,7 @@ async fn dispatch_cli(subcommand: Subcommand, mut launcher: NoitaLauncher) -> ey
                     args.fetch.branch.as_deref(),
                     args.fetch.validate,
                 )
-                .await?
+                .await?;
         }
         Subcommand::Prefetch(args) => {
             launcher
@@ -154,7 +155,7 @@ async fn dispatch_cli(subcommand: Subcommand, mut launcher: NoitaLauncher) -> ey
                 .await?
         }
         Subcommand::PrefetchAll(args) => launcher.prefetch_all(args.validate).await?,
-        Subcommand::Remove(args) => launcher.remove_instance(&args.name).await?,
+        Subcommand::Remove(args) => launcher.remove_instances(&args.names).await?,
         Subcommand::List => launcher.list_instances().await?,
         Subcommand::Saves => launcher.list_saves().await?,
     }

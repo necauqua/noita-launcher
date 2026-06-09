@@ -8,7 +8,7 @@ edition = "2024"
 # connecting to steam and downloading stuff
 steam-vent = "0.5.0"
 steam-vent-proto = "0.5.2"
-reqwest = { version = "0.13.3", features = ["rustls"] }
+reqwest = { version = "0.13.4", features = ["rustls"] }
 bytes = "1.11.1"
 sha1 = "0.11.0"
 
@@ -25,19 +25,21 @@ zstd = "0.13.3"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 # decrypting depots
-aes = "0.9.0"
+aes = "0.9.1"
 ecb = "0.2.0"
-cbc = "0.2.0"
+cbc = "0.2.1"
 
 # cli
 clap = { version = "4.6.1", features = ["derive"] }
 inquire = "0.9.4"
 indicatif = "0.18.4"
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
+chrono = "0.4.45"
+chrono-tz = "0.10.4"
 
 # app
 dirs = { version = "6.0.0", default-features = false }
-keyring = "4.0.0"
+keyring = "4.0.1"
 keyring-core = "1.0.0"
 fastrand = "2.4.1"
 

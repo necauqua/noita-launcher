@@ -62,17 +62,15 @@ fn run(init: std.process.Init) !u32 {
     const arena = init.arena.allocator();
 
     const argv = try init.minimal.args.toSlice(arena);
-    if (argv.len < 5) {
-        std.log.debug("bad args, expected: noita-trampoline.exe <instance-dir> <noita-exe> <path-hook-dll> <save-path> [noita args...]", .{});
+    if (argv.len < 4) {
+        std.log.debug("bad args, expected: noita-trampoline.exe <noita-exe> <path-hook-dll> <save-path> [noita args...]", .{});
         return 1;
     }
-    const instanceDir = argv[1];
-    const noitaExe = argv[2];
-    const hookDll = argv[3];
-    const savePath = argv[4];
-    const noitaArgs = argv[5..];
+    const noitaExe = argv[1];
+    const hookDll = argv[2];
+    const savePath = argv[3];
+    const noitaArgs = argv[4..];
 
-    std.log.debug("instanceDir: {s}", .{instanceDir});
     std.log.debug("noitaExe: {s}", .{noitaExe});
     std.log.debug("hookDll: {s}", .{hookDll});
     std.log.debug("savePath: {s}", .{savePath});
@@ -87,13 +85,12 @@ fn run(init: std.process.Init) !u32 {
     std.log.debug("launching noita with command line: {s}", .{cmdline});
 
     const cmdlineWide = try std.unicode.utf8ToUtf16LeAllocZ(arena, cmdline);
-    const instanceDirWide = try std.unicode.utf8ToUtf16LeAllocZ(arena, instanceDir);
 
     var si = std.mem.zeroes(win.STARTUPINFOW);
     si.cb = @sizeOf(win.STARTUPINFOW);
     var pi = std.mem.zeroes(win.PROCESS_INFORMATION);
 
-    if (win.CreateProcessW(null, cmdlineWide.ptr, null, null, 0, .{ .CREATE_SUSPENDED = 1 }, null, instanceDirWide.ptr, &si, &pi) == 0) {
+    if (win.CreateProcessW(null, cmdlineWide.ptr, null, null, 0, .{ .CREATE_SUSPENDED = 1 }, null, null, &si, &pi) == 0) {
         fail("CreateProcessW(noita.exe)");
     }
     errdefer _ = win.TerminateProcess(pi.hProcess, 1);

@@ -1,8 +1,10 @@
 use std::{io::ErrorKind, path::PathBuf};
 
+use chrono::TimeZone;
 use color_eyre::Section;
 use eyre::{Context, OptionExt};
 use keyring_core::Entry;
+use owo_colors::OwoColorize as _;
 use steam_vent::{
     Connection, ConnectionError, ServerList,
     auth::{
@@ -10,8 +12,16 @@ use steam_vent::{
         FileGuardDataStore, GuardTokenType, SteamGuardToken,
     },
 };
+use steam_vent_proto::content_manifest::content_manifest_payload::FileMapping;
+use tokio::io::AsyncReadExt;
 
-use crate::{download::InstanceDownloader, meta::Save, printer::Printer, steam::Steam, user_bail};
+use crate::{
+    download::InstanceDownloader,
+    meta::{InstanceMeta, SaveMeta},
+    printer::Printer,
+    steam::Steam,
+    user_bail,
+};
 
 pub struct SteamTwoFactor {
     printer: Printer,
@@ -79,8 +89,10 @@ impl AuthConfirmationHandler for SteamTwoFactor {
 //     noita-trampoline.exe
 //     wineprefix/ - WINEPREFIX on linux
 //     temp/<name>.<random>/ - temporary instance dirs used during download
-//     instances/<name>/.. - instance dir, cwd for a particular Noita version
-//     saves/<name>/.. - a single save dir
+//     instances/<name>/ - instance dir, cwd for a particular Noita version
+//       meta.toml - our per-instance settings and metadata
+//       Noita/.. - game cwd
+//     saves/<name>/ - a single save dir
 //       meta.toml - our per-save settings
 //       Nolla_Games_Noita/.. - Noita seed the save folder as the appdata, so it uses this folder
 
@@ -92,6 +104,7 @@ pub struct NoitaLauncher {
     printer: Printer,
     steam: Option<Steam>,
     http: Option<reqwest::Client>,
+    downloader: Option<InstanceDownloader>,
 }
 
 const APP_ID: u32 = 881100;
@@ -113,6 +126,7 @@ impl NoitaLauncher {
             printer,
             steam: None,
             http: None,
+            downloader: None,
         }
     }
 
@@ -166,6 +180,32 @@ impl NoitaLauncher {
         }
     }
 
+    async fn downloader(&mut self) -> eyre::Result<InstanceDownloader> {
+        // and again
+        if self.downloader.is_some() {
+            return Ok(self.downloader.as_mut().unwrap().clone());
+        }
+
+        let steam = self.steam().await?;
+        let depot = steam.get_depot(APP_ID, DEPOT_ID).await?;
+        let cdn_hosts = steam.get_cdn_hosts().await?;
+        let http = self.http();
+
+        let chunk_cache = self.cache_dir.join("chunks");
+        tokio::fs::create_dir_all(&chunk_cache).await?;
+
+        Ok(self
+            .downloader
+            .insert(InstanceDownloader::new(
+                depot,
+                cdn_hosts,
+                chunk_cache,
+                http,
+                32,
+            ))
+            .clone())
+    }
+
     pub async fn login(&mut self, username: &str, password: &str) -> eyre::Result<()> {
         let entry = Self::keyring_entry()?;
 
@@ -215,7 +255,9 @@ impl NoitaLauncher {
     ) -> eyre::Result<()> {
         let instance_dir = self.app_dir.join("instances").join(instance);
 
-        if !tokio::fs::try_exists(&instance_dir).await? {
+        let mut fresh = false;
+
+        let meta = if !tokio::fs::try_exists(&instance_dir).await? {
             if instance != "main" {
                 user_bail!(
                     "Instance '{instance}' does not exist",
@@ -224,8 +266,12 @@ impl NoitaLauncher {
             }
             self.printer
                 .hint("Default instance 'main' does not exist, setting it up..");
-            self.new_instance(instance, None, None, false).await?;
-        }
+            fresh = true;
+            self.new_instance(instance, None, None, false).await?
+        } else {
+            InstanceMeta::read(&instance_dir.join("meta.toml")).await?
+        };
+
         let save_path = self.app_dir.join("saves").join(save);
         tokio::fs::create_dir_all(&save_path)
             .await
@@ -233,7 +279,7 @@ impl NoitaLauncher {
 
         let meta_path = save_path.join("meta.toml");
 
-        if let Some(mut meta) = Save::read(&meta_path).await? {
+        if let Some(mut meta) = SaveMeta::read(&meta_path).await? {
             if meta.instance != instance {
                 if force {
                     meta.instance = instance.into();
@@ -249,10 +295,12 @@ impl NoitaLauncher {
                 }
             }
         } else {
-            self.printer.warn(format!(
-                "Save {save} did not have meta.toml, creating one associated with '{instance}'"
-            ));
-            crate::meta::Save {
+            if !fresh {
+                self.printer.warn(format!(
+                    "Save {save} did not have meta.toml, creating one associated with '{instance}'"
+                ));
+            }
+            SaveMeta {
                 instance: instance.into(),
                 description: None,
             }
@@ -260,16 +308,14 @@ impl NoitaLauncher {
             .await?
         }
 
-        let noita_args = ["-no_logo_splashes"];
-
         #[cfg(windows)]
         {
             Command::new(&self.trampoline)
-                .arg(instance_dir.join("noita.exe"))
+                .arg("noita.exe")
                 .arg(&self.hook_dll)
                 .arg(save_path)
-                .args(noita_args)
-                .current_dir(instance_dir)
+                .args(meta.noita_args)
+                .current_dir(instance_dir.join("Noita"))
                 .spawn()?
                 .wait()
                 .await?;
@@ -290,12 +336,11 @@ impl NoitaLauncher {
                 .env("WINEDEBUG", "-all,+debugstr")
                 .env("WINEDLLOVERRIDES", "winmm=n,b") // allow winmm.dll to be used for an asi loader
                 .arg(&self.trampoline)
-                .arg(&instance_dir)
                 .arg("noita.exe")
                 .arg(to_wine(&self.hook_dll))
                 .arg(to_wine(&save_path))
-                .args(noita_args)
-                .current_dir(instance_dir)
+                .args(meta.noita_args)
+                .current_dir(instance_dir.join("Noita"))
                 .spawn()
                 .wrap_err("Running the game with umu-run")
                 .note("Running on non-Windows requires umu-launcher to be installed (umu-run in PATH)")?
@@ -311,7 +356,7 @@ impl NoitaLauncher {
         manifest: Option<u64>,
         branch: Option<&str>,
         validate: bool,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<InstanceMeta> {
         let instances_path = self.app_dir.join("instances");
         tokio::fs::create_dir_all(&instances_path).await?;
 
@@ -320,10 +365,13 @@ impl NoitaLauncher {
             user_bail!("Instance '{name}' already exists");
         }
 
-        let (size, downloader) = self.setup_downloader(manifest, branch).await?;
+        let (size, manifest, mappings) = self.prepare_download(manifest, branch).await?;
+        let downloader = self.downloader().await?;
 
         let cache_bar = self.printer.bar(size).with_prefix("Checking cached chunks");
-        let cached_size = downloader.compute_cached_size(validate, cache_bar).await?;
+        let cached_size = downloader
+            .compute_cached_size(&mappings, validate, cache_bar)
+            .await?;
 
         let download_size = size - cached_size;
 
@@ -346,23 +394,33 @@ impl NoitaLauncher {
         let write_bar = self.printer.bar(size).with_prefix("Writing instance files");
 
         downloader
-            .fetch(&temp_path, download_bar, write_bar)
+            .fetch(mappings, &temp_path, download_bar, write_bar)
             .await?;
 
-        if tokio::fs::try_exists(&instance_path).await? {
+        let instance_cwd = instance_path.join("Noita");
+
+        if tokio::fs::try_exists(&instance_cwd).await? {
             tokio::fs::remove_dir_all(&temp_path).await?;
             user_bail!("Instance '{name}' was created during the download, aborting",);
         }
-        tokio::fs::rename(temp_path, instance_path).await?;
+        tokio::fs::create_dir_all(&instance_path).await?;
+        tokio::fs::rename(temp_path, instance_cwd).await?;
 
-        Ok(())
+        let meta = InstanceMeta {
+            noita_args: vec!["-no_logo_splashes".into()],
+            steam_manifest: manifest,
+            description: None,
+        };
+        meta.write(&instance_path.join("meta.toml")).await?;
+
+        Ok(meta)
     }
 
-    pub async fn setup_downloader(
+    pub async fn prepare_download(
         &mut self,
         manifest: Option<u64>,
         branch: Option<&str>,
-    ) -> eyre::Result<(u64, InstanceDownloader)> {
+    ) -> eyre::Result<(u64, u64, Vec<FileMapping>)> {
         let steam = self.steam().await?;
 
         let manifest = match manifest {
@@ -379,23 +437,16 @@ impl NoitaLauncher {
             }
         };
 
-        let cdn_hosts = steam.get_cdn_hosts().await?;
         let depot = steam.get_depot(APP_ID, DEPOT_ID).await?;
 
         let (meta, payload) = steam
             .fetch_manifest(APP_ID, &depot, manifest, branch)
             .await?;
 
-        let chunk_cache = self.cache_dir.join("chunks");
-        tokio::fs::create_dir_all(&chunk_cache).await?;
-
         // eh we track uncompressed download size because cache's uncompressed
         let size = meta.cb_disk_original();
 
-        Ok((
-            size,
-            InstanceDownloader::new(depot, payload, cdn_hosts, chunk_cache, self.http(), 32),
-        ))
+        Ok((size, manifest, payload.mappings))
     }
 
     pub async fn prefetch(
@@ -404,10 +455,13 @@ impl NoitaLauncher {
         branch: Option<&str>,
         validate: bool,
     ) -> eyre::Result<()> {
-        let (size, downloader) = self.setup_downloader(manifest, branch).await?;
+        let (size, _, mappings) = self.prepare_download(manifest, branch).await?;
+        let downloader = self.downloader().await?;
 
         let bar = self.printer.bar(size).with_prefix("Checking cached chunks");
-        let cached_size = downloader.compute_cached_size(validate, bar).await?;
+        let cached_size = downloader
+            .compute_cached_size(&mappings, validate, bar)
+            .await?;
 
         let download_size = size - cached_size;
 
@@ -416,7 +470,7 @@ impl NoitaLauncher {
                 .printer
                 .bar(download_size)
                 .with_prefix("Downloading chunks");
-            downloader.prefetch(bar).await?;
+            downloader.prefetch(&mappings, bar).await?;
             self.printer.hint("Downloaded missing chunks");
         } else {
             self.printer
@@ -443,13 +497,16 @@ impl NoitaLauncher {
         Ok(())
     }
 
-    pub async fn remove_instance(&mut self, name: &str) -> eyre::Result<()> {
-        let instance_dir = self.app_dir.join("instances").join(name);
-        if !tokio::fs::try_exists(&instance_dir).await? {
-            user_bail!("Instance '{name}' does not exist");
+    pub async fn remove_instances(&mut self, names: &[String]) -> eyre::Result<()> {
+        for name in names {
+            let instance_dir = self.app_dir.join("instances").join(name);
+            if tokio::fs::try_exists(&instance_dir).await? {
+                tokio::fs::remove_dir_all(instance_dir).await?;
+            } else {
+                self.printer
+                    .warn(format!("Instance '{name}' does not exist"));
+            }
         }
-
-        tokio::fs::remove_dir_all(instance_dir).await?;
 
         Ok(())
     }
@@ -462,18 +519,46 @@ impl NoitaLauncher {
             e => Some(e?),
         };
 
-        let mut any = false;
+        let mut rows = vec![];
+        let mut max_name_len = 0;
 
         if let Some(entries) = &mut entries {
             while let Some(entry) = entries.next_entry().await? {
-                any = true;
-                println!("{}", entry.file_name().to_string_lossy());
+                let mut file =
+                    tokio::fs::File::open(entry.path().join("Noita").join("noita.exe")).await?;
+                let mut bytes = vec![0u8; 4 * 1024];
+                file.read_exact(&mut bytes).await?;
+
+                let timestamp = InstanceMeta::get_pe_timestamp(&bytes)?;
+                let timestamp_str = chrono_tz::Europe::Helsinki
+                    .timestamp_opt(timestamp as i64, 0)
+                    .unwrap()
+                    .format("%b %e %Y")
+                    .to_string();
+
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.len() > max_name_len {
+                    max_name_len = name.len();
+                }
+
+                rows.push((name, timestamp, timestamp_str));
             }
         }
 
-        if !any {
+        if rows.is_empty() {
             self.printer
                 .hint("No instances found, run `noita new` to create one");
+            return Ok(());
+        }
+
+        for (name, ts, ts_str) in rows {
+            println!(
+                "{:width$} {} ({})",
+                name.bold(),
+                ts_str.dimmed(),
+                format!("{ts:x}").green(),
+                width = max_name_len,
+            );
         }
 
         Ok(())
@@ -488,18 +573,36 @@ impl NoitaLauncher {
             e => Some(e?),
         };
 
-        let mut any = false;
+        let mut rows = vec![];
+        let mut max_name_len = 0;
 
         if let Some(entries) = &mut entries {
             while let Some(entry) = entries.next_entry().await? {
-                any = true;
-                println!("{}", entry.file_name().to_string_lossy());
+                let name = entry.file_name().to_string_lossy().into_owned();
+
+                let Some(meta) = SaveMeta::read(&entry.path().join("meta.toml")).await? else {
+                    continue;
+                };
+                if name.len() > max_name_len {
+                    max_name_len = name.len();
+                }
+                rows.push((name, meta))
             }
         }
 
-        if !any {
+        if rows.is_empty() {
             self.printer
                 .hint("No saves found, run an instance (with `noita run`)");
+            return Ok(());
+        }
+
+        for (name, meta) in rows {
+            println!(
+                "{:width$} ({})",
+                name.bold(),
+                meta.instance.dimmed(),
+                width = max_name_len,
+            );
         }
 
         Ok(())

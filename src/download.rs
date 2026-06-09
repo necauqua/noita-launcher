@@ -19,7 +19,6 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use sha1::Digest;
 use sha1::Sha1;
-use steam_vent_proto::content_manifest::ContentManifestPayload;
 use steam_vent_proto::content_manifest::content_manifest_payload::FileMapping;
 use steam_vent_proto::content_manifest::content_manifest_payload::file_mapping::ChunkData;
 use tokio::io::AsyncSeekExt as _;
@@ -79,8 +78,7 @@ impl ProgressCallback for indicatif::ProgressBar {
 }
 
 pub struct InstanceDownloaderState {
-    depot: Depot,
-    manifest: ContentManifestPayload,
+    pub depot: Depot,
     cache: PathBuf,
     cdn: CdnDownloader,
 }
@@ -99,7 +97,6 @@ impl Deref for InstanceDownloader {
 impl InstanceDownloader {
     pub fn new(
         depot: Depot,
-        manifest: ContentManifestPayload,
         cdn_hosts: Arc<[String]>,
         cache: PathBuf,
         http: reqwest::Client,
@@ -107,13 +104,16 @@ impl InstanceDownloader {
     ) -> Self {
         Self(Arc::new(InstanceDownloaderState {
             depot,
-            manifest,
             cache,
             cdn: CdnDownloader::new(cdn_hosts, http, parallelism),
         }))
     }
 
-    async fn fetch_chunk(&self, chunk: &Chunk, progress: impl ProgressCallback) -> Result<Vec<u8>> {
+    pub async fn fetch_chunk(
+        &self,
+        chunk: &Chunk,
+        progress: impl ProgressCallback,
+    ) -> Result<Vec<u8>> {
         let cache_path = chunk.get_cache_path(&self.cache);
 
         match tokio::fs::read(&cache_path).await {
@@ -212,14 +212,13 @@ impl InstanceDownloader {
 
     pub async fn compute_cached_size(
         &self,
+        mappings: &[FileMapping],
         validate: bool,
         progress: impl ProgressCallback,
     ) -> Result<u64> {
         let total = Arc::new(AtomicU64::new(0));
 
-        let mut join_set = self
-            .manifest
-            .mappings
+        let mut join_set = mappings
             .iter()
             .flat_map(|m| m.chunks.iter())
             .map(|chunk| {
@@ -265,9 +264,13 @@ impl InstanceDownloader {
         Ok(total.load(Ordering::Relaxed))
     }
 
-    pub async fn prefetch(&self, progress: impl ProgressCallback) -> Result<()> {
+    pub async fn prefetch(
+        &self,
+        mappings: &[FileMapping],
+        progress: impl ProgressCallback,
+    ) -> Result<()> {
         let mut tasks = FuturesUnordered::new();
-        for mapping in &self.manifest.mappings {
+        for mapping in mappings {
             // skip dir entries
             if mapping.flags() & 0x40 != 0 {
                 continue;
@@ -290,12 +293,13 @@ impl InstanceDownloader {
 
     pub async fn fetch(
         &self,
+        mappings: Vec<FileMapping>,
         folder: &Path,
         progress: impl ProgressCallback,
         write_progress: impl ProgressCallback,
     ) -> Result<()> {
         let mut tasks = FuturesUnordered::new();
-        for mapping in &self.manifest.mappings {
+        for mapping in &mappings {
             // skip dir entries
             if mapping.flags() & 0x40 != 0 {
                 continue;
