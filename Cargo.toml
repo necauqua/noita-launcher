@@ -33,7 +33,7 @@ cbc = "0.2.1"
 clap = { version = "4.6.1", features = ["derive"] }
 inquire = "0.9.4"
 indicatif = "0.18.4"
-owo-colors = { version = "4.3.0", features = ["supports-colors"] }
+yansi = { version = "1.0.1", features = ["detect-tty", "detect-env", "hyperlink"] }
 chrono = "0.4.45"
 chrono-tz = "0.10.4"
 

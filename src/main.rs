@@ -1,8 +1,13 @@
+use clap::ColorChoice;
 use clap::Parser;
 use color_eyre::Section;
 use eyre::OptionExt;
 use inquire::InquireError;
-use noita_launcher::{error::UserError, launcher::NoitaLauncher, printer::Printer};
+use noita_launcher::error::UserError;
+use noita_launcher::launcher::NoitaLauncher;
+use noita_launcher::printer::Printer;
+use yansi::Condition;
+use yansi::Paint;
 
 /// Manage multiple isolated Noita instances, each pinned to a specific game version.
 ///
@@ -13,6 +18,17 @@ struct Args {
     /// Suppress all non-essential output
     #[clap(short, long)]
     quiet: bool,
+    /// Specify WHEN to colorize output
+    #[clap(
+        short = 'C',
+        long,
+        default_value = "auto",
+        default_missing_value = "always",
+        value_name = "WHEN",
+        num_args = 0..=1,
+        require_equals = true,
+    )]
+    color: ColorChoice,
     #[clap(subcommand)]
     subcommand: Option<Subcommand>,
 }
@@ -193,9 +209,14 @@ async fn main() -> eyre::Result<()> {
     .await?;
 
     let args = Args::parse();
+    yansi::whenever(match args.color {
+        ColorChoice::Auto => Condition::TTY_AND_COLOR,
+        ColorChoice::Always => Condition::ALWAYS,
+        ColorChoice::Never => Condition::NEVER,
+    });
 
     let Some(subcommand) = args.subcommand else {
-        println!("your \x1b[9mad\x1b[m gui here");
+        println!("your {} gui here", "ad".strike());
         return Ok(());
     };
 

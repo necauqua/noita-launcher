@@ -12,7 +12,7 @@ macro_rules! user_bail {
     ($message:expr, hint=$hint:expr $(,$arg:tt)* $(,)?) => {
         return Err(::eyre::eyre!($crate::error::UserError {
             message: format!($message, $($arg)*),
-            hint: Some($hint.to_string()),
+            hint: Some($hint.into()),
         }));
     };
     ($message:expr $(,$arg:tt)* $(,)?) => {

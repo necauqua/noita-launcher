@@ -1,27 +1,31 @@
-use std::{io::ErrorKind, path::PathBuf};
+use std::io::ErrorKind;
+use std::path::PathBuf;
 
 use chrono::TimeZone;
 use color_eyre::Section;
-use eyre::{Context, OptionExt};
+use eyre::Context;
+use eyre::OptionExt;
 use keyring_core::Entry;
-use owo_colors::OwoColorize as _;
-use steam_vent::{
-    Connection, ConnectionError, ServerList,
-    auth::{
-        AuthConfirmationHandler, ConfirmationAction, ConfirmationMethod, ConfirmationMethodClass,
-        FileGuardDataStore, GuardTokenType, SteamGuardToken,
-    },
-};
+use steam_vent::Connection;
+use steam_vent::ConnectionError;
+use steam_vent::ServerList;
+use steam_vent::auth::AuthConfirmationHandler;
+use steam_vent::auth::ConfirmationAction;
+use steam_vent::auth::ConfirmationMethod;
+use steam_vent::auth::ConfirmationMethodClass;
+use steam_vent::auth::FileGuardDataStore;
+use steam_vent::auth::GuardTokenType;
+use steam_vent::auth::SteamGuardToken;
 use steam_vent_proto::content_manifest::content_manifest_payload::FileMapping;
 use tokio::io::AsyncReadExt;
+use yansi::Paint;
 
-use crate::{
-    download::InstanceDownloader,
-    meta::{InstanceMeta, SaveMeta},
-    printer::Printer,
-    steam::Steam,
-    user_bail,
-};
+use crate::download::InstanceDownloader;
+use crate::meta::InstanceMeta;
+use crate::meta::SaveMeta;
+use crate::printer::Printer;
+use crate::steam::Steam;
+use crate::user_bail;
 
 pub struct SteamTwoFactor {
     printer: Printer,
@@ -555,7 +559,7 @@ impl NoitaLauncher {
             println!(
                 "{:width$} {} ({})",
                 name.bold(),
-                ts_str.dimmed(),
+                ts_str.dim(),
                 format!("{ts:x}").green(),
                 width = max_name_len,
             );
@@ -600,7 +604,7 @@ impl NoitaLauncher {
             println!(
                 "{:width$} ({})",
                 name.bold(),
-                meta.instance.dimmed(),
+                meta.instance.dim(),
                 width = max_name_len,
             );
         }

@@ -1,5 +1,5 @@
 use indicatif::ProgressStyle;
-use owo_colors::{OwoColorize as _, Stream, Style};
+use yansi::Paint;
 
 #[derive(Clone)]
 pub struct Printer(indicatif::MultiProgress);
@@ -14,27 +14,17 @@ impl Printer {
     }
 
     pub fn hint(&self, msg: impl Into<String>) {
-        let colored = msg
-            .into()
-            .if_supports_color(Stream::Stderr, |t| t.dimmed())
-            .to_string();
-        self.0.println(colored).unwrap();
+        self.0.println(msg.into().dim().to_string()).unwrap();
     }
 
     pub fn warn(&self, msg: impl Into<String>) {
-        let colored = msg
-            .into()
-            .if_supports_color(Stream::Stderr, |t| t.style(Style::new().dimmed().yellow()))
-            .to_string();
-        self.0.println(colored).unwrap();
+        self.0
+            .println(msg.into().dim().yellow().to_string())
+            .unwrap();
     }
 
     pub fn error(&self, msg: impl Into<String>) {
-        let colored = msg
-            .into()
-            .if_supports_color(Stream::Stderr, |t| t.style(Style::new().bold().red()))
-            .to_string();
-        self.0.println(colored).unwrap();
+        self.0.println(msg.into().bold().red().to_string()).unwrap();
     }
 
     pub fn bar(&mut self, len: u64) -> indicatif::ProgressBar {
