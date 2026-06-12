@@ -122,7 +122,11 @@ enum Subcommand {
     Saves,
 }
 
-async fn dispatch_cli(subcommand: Subcommand, mut launcher: NoitaLauncher) -> eyre::Result<()> {
+async fn dispatch_cli(
+    subcommand: Subcommand,
+    printer: Printer,
+    mut launcher: NoitaLauncher,
+) -> eyre::Result<()> {
     match subcommand {
         Subcommand::Login(args) => {
             let username = match args.username {
@@ -172,8 +176,48 @@ async fn dispatch_cli(subcommand: Subcommand, mut launcher: NoitaLauncher) -> ey
         }
         Subcommand::PrefetchAll(args) => launcher.prefetch_all(args.validate).await?,
         Subcommand::Remove(args) => launcher.remove_instances(&args.names).await?,
-        Subcommand::List => launcher.list_instances().await?,
-        Subcommand::Saves => launcher.list_saves().await?,
+        Subcommand::List => {
+            let instances = launcher.list_instances().await?;
+
+            if instances.is_empty() {
+                printer.hint("No instances found, run `noita new` to create one");
+                return Ok(());
+            }
+
+            let max_name_len = instances
+                .iter()
+                .map(|(n, _)| n.len())
+                .max()
+                .unwrap_or_default();
+
+            for (name, meta) in instances {
+                println!(
+                    "{:width$} {} ({})",
+                    name.bold(),
+                    meta.human_timestamp().dim(),
+                    format!("{:x}", meta.pe_timestamp).green(),
+                    width = max_name_len,
+                );
+            }
+        }
+        Subcommand::Saves => {
+            let saves = launcher.list_saves().await?;
+            if saves.is_empty() {
+                printer.hint("No saves found, run an instance (with `noita run`)");
+                return Ok(());
+            }
+
+            let max_name_len = saves.iter().map(|(n, _)| n.len()).max().unwrap_or_default();
+
+            for (name, meta) in saves {
+                println!(
+                    "{:width$} ({})",
+                    name.bold(),
+                    meta.instance.dim(),
+                    width = max_name_len,
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -223,7 +267,7 @@ async fn main() -> eyre::Result<()> {
     let printer = Printer::new(args.quiet);
     let launcher = NoitaLauncher::new(app_dir, trampoline, hook_dll, cache_dir, printer.clone());
 
-    match dispatch_cli(subcommand, launcher).await {
+    match dispatch_cli(subcommand, printer.clone(), launcher).await {
         Ok(()) => Ok(()),
         Err(e) => match e.downcast::<UserError>() {
             Ok(user_error) => {

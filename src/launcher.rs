@@ -1,7 +1,6 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-use chrono::TimeZone;
 use color_eyre::Section;
 use eyre::Context;
 use eyre::OptionExt;
@@ -17,8 +16,6 @@ use steam_vent::auth::FileGuardDataStore;
 use steam_vent::auth::GuardTokenType;
 use steam_vent::auth::SteamGuardToken;
 use steam_vent_proto::content_manifest::content_manifest_payload::FileMapping;
-use tokio::io::AsyncReadExt;
-use yansi::Paint;
 
 use crate::download::InstanceDownloader;
 use crate::meta::InstanceMeta;
@@ -273,7 +270,7 @@ impl NoitaLauncher {
             fresh = true;
             self.new_instance(instance, None, None, false).await?
         } else {
-            InstanceMeta::read(&instance_dir.join("meta.toml")).await?
+            InstanceMeta::read(&instance_dir).await?
         };
 
         let save_path = self.app_dir.join("saves").join(save);
@@ -281,13 +278,11 @@ impl NoitaLauncher {
             .await
             .wrap_err_with(|| format!("Creating dir ({})", save_path.display()))?;
 
-        let meta_path = save_path.join("meta.toml");
-
-        if let Some(mut meta) = SaveMeta::read(&meta_path).await? {
+        if let Some(mut meta) = SaveMeta::read(&save_path).await? {
             if meta.instance != instance {
                 if force {
                     meta.instance = instance.into();
-                    meta.write(&meta_path).await?;
+                    meta.write(&save_path).await?;
                     self.printer.warn(format!(
                         "Overriding save '{save}' to be associated with instance '{instance}' (was associated with '{}')", meta.instance
                     ));
@@ -304,12 +299,7 @@ impl NoitaLauncher {
                     "Save {save} did not have meta.toml, creating one associated with '{instance}'"
                 ));
             }
-            SaveMeta {
-                instance: instance.into(),
-                description: None,
-            }
-            .write(&meta_path)
-            .await?
+            SaveMeta::new(instance.into()).write(&save_path).await?
         }
 
         #[cfg(windows)]
@@ -410,13 +400,8 @@ impl NoitaLauncher {
         tokio::fs::create_dir_all(&instance_path).await?;
         tokio::fs::rename(temp_path, instance_cwd).await?;
 
-        let meta = InstanceMeta {
-            noita_args: vec!["-no_logo_splashes".into()],
-            steam_manifest: manifest,
-            description: None,
-        };
+        let meta = InstanceMeta::new(vec!["-no_logo_splashes".into()], manifest);
         meta.write(&instance_path.join("meta.toml")).await?;
-
         Ok(meta)
     }
 
@@ -517,98 +502,48 @@ impl NoitaLauncher {
 
     // todo: list some stats, like number of installed mods etc
     // ( + manifest id mb? get noita build string from noita.exe, or some _version_hash.txt matching bs)
-    pub async fn list_instances(&self) -> eyre::Result<()> {
+    pub async fn list_instances(&self) -> eyre::Result<Vec<(String, InstanceMeta)>> {
+        let mut result = vec![];
+
         let mut entries = match tokio::fs::read_dir(self.app_dir.join("instances")).await {
             Err(e) if e.kind() == ErrorKind::NotFound => None,
             e => Some(e?),
         };
-
-        let mut rows = vec![];
-        let mut max_name_len = 0;
-
         if let Some(entries) = &mut entries {
             while let Some(entry) = entries.next_entry().await? {
-                let mut file =
-                    tokio::fs::File::open(entry.path().join("Noita").join("noita.exe")).await?;
-                let mut bytes = vec![0u8; 4 * 1024];
-                file.read_exact(&mut bytes).await?;
-
-                let timestamp = InstanceMeta::get_pe_timestamp(&bytes)?;
-                let timestamp_str = chrono_tz::Europe::Helsinki
-                    .timestamp_opt(timestamp as i64, 0)
-                    .unwrap()
-                    .format("%b %e %Y")
-                    .to_string();
-
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.len() > max_name_len {
-                    max_name_len = name.len();
-                }
-
-                rows.push((name, timestamp, timestamp_str));
+                result.push((
+                    entry.file_name().to_string_lossy().into_owned(),
+                    InstanceMeta::read(&entry.path()).await?,
+                ));
             }
         }
 
-        if rows.is_empty() {
-            self.printer
-                .hint("No instances found, run `noita new` to create one");
-            return Ok(());
-        }
-
-        for (name, ts, ts_str) in rows {
-            println!(
-                "{:width$} {} ({})",
-                name.bold(),
-                ts_str.dim(),
-                format!("{ts:x}").green(),
-                width = max_name_len,
-            );
-        }
-
-        Ok(())
+        Ok(result)
     }
 
     // todo list some save info, like
     //   global stats (d/w/cur/pb/playtime),
     //   local stats (current biome, session playtime, seed etc)
-    pub async fn list_saves(&self) -> eyre::Result<()> {
+    pub async fn list_saves(&self) -> eyre::Result<Vec<(String, SaveMeta)>> {
         let mut entries = match tokio::fs::read_dir(self.app_dir.join("saves")).await {
             Err(e) if e.kind() == ErrorKind::NotFound => None,
             e => Some(e?),
         };
 
-        let mut rows = vec![];
-        let mut max_name_len = 0;
+        let mut result = vec![];
 
         if let Some(entries) = &mut entries {
             while let Some(entry) = entries.next_entry().await? {
-                let name = entry.file_name().to_string_lossy().into_owned();
-
-                let Some(meta) = SaveMeta::read(&entry.path().join("meta.toml")).await? else {
-                    continue;
-                };
-                if name.len() > max_name_len {
-                    max_name_len = name.len();
-                }
-                rows.push((name, meta))
+                result.push((
+                    entry.file_name().to_string_lossy().into_owned(),
+                    match SaveMeta::read(&entry.path()).await? {
+                        Some(meta) => meta,
+                        None => continue,
+                    },
+                ))
             }
         }
 
-        if rows.is_empty() {
-            self.printer
-                .hint("No saves found, run an instance (with `noita run`)");
-            return Ok(());
-        }
-
-        for (name, meta) in rows {
-            println!(
-                "{:width$} ({})",
-                name.bold(),
-                meta.instance.dim(),
-                width = max_name_len,
-            );
-        }
-
-        Ok(())
+        Ok(result)
     }
 }
