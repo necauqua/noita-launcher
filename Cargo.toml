@@ -29,6 +29,10 @@ aes = "0.9.1"
 ecb = "0.2.0"
 cbc = "0.2.1"
 
+# and .salakieli lol
+ctr = "0.10.1"
+nxml-rs = { version = "0.5.1", default-features = false }
+
 # cli
 clap = { version = "4.6.1", features = ["derive"] }
 inquire = "0.9.4"

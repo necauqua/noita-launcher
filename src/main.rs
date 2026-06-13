@@ -6,6 +6,7 @@ use inquire::InquireError;
 use noita_launcher::error::UserError;
 use noita_launcher::launcher::NoitaLauncher;
 use noita_launcher::printer::Printer;
+use std::fmt::Write as _;
 use yansi::Condition;
 use yansi::Paint;
 
@@ -202,6 +203,7 @@ async fn dispatch_cli(
         }
         Subcommand::Saves => {
             let saves = launcher.list_saves().await?;
+
             if saves.is_empty() {
                 printer.hint("No saves found, run an instance (with `noita run`)");
                 return Ok(());
@@ -210,8 +212,32 @@ async fn dispatch_cli(
             let max_name_len = saves.iter().map(|(n, _)| n.len()).max().unwrap_or_default();
 
             for (name, meta) in saves {
+                let s = match meta.stats {
+                    None => Default::default(),
+                    Some(stats) => {
+                        let mut s = String::new();
+                        s += " | ";
+                        if stats.wins > 0 {
+                            write!(&mut s, "wins: {} ", stats.wins).unwrap();
+                        }
+                        if stats.deaths > 0 {
+                            write!(&mut s, "deaths: {} ", stats.deaths).unwrap();
+                        }
+                        if stats.win_streak > 0 || stats.win_streak_pb > 0 {
+                            write!(
+                                &mut s,
+                                "streak: {} (pb: {})",
+                                stats.win_streak, stats.win_streak_pb
+                            )
+                            .unwrap();
+                        }
+                        s.truncate(s.trim_end().len());
+                        s
+                    }
+                };
+
                 println!(
-                    "{:width$} ({})",
+                    "{:width$} ({}){s}",
                     name.bold(),
                     meta.instance.dim(),
                     width = max_name_len,

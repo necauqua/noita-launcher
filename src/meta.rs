@@ -1,3 +1,6 @@
+use aes::Aes128;
+use aes::cipher::KeyIvInit;
+use aes::cipher::StreamCipher;
 use chrono::TimeZone;
 use color_eyre::Section;
 use eyre::Context;
@@ -44,6 +47,9 @@ pub struct SaveMeta {
     pub description: Option<String>,
     #[serde(default = "zero", skip_serializing_if = "is_zero")]
     pub order: u32,
+
+    #[serde(skip)]
+    pub stats: Option<NoitaStats>,
 }
 
 impl SaveMeta {
@@ -52,15 +58,24 @@ impl SaveMeta {
             instance,
             description: None,
             order: 0,
+            stats: None,
         }
     }
 
     pub async fn read(save_dir: &Path) -> Result<Option<Self>> {
         let path = save_dir.join("meta.toml");
         match tokio::fs::read(&path).await {
-            Ok(bytes) => toml::from_slice(&bytes).map(Some).map_err(|e| {
-                eyre!(e).suggestion(format!("Delete or fix the file {}", path.display()))
-            }),
+            Ok(bytes) => {
+                let mut meta = toml::from_slice::<Self>(&bytes).map(Some).map_err(|e| {
+                    eyre!(e).suggestion(format!("Delete or fix the file {}", path.display()))
+                })?;
+
+                if let Some(meta) = &mut meta {
+                    meta.stats = NoitaStats::read(save_dir).await?;
+                }
+
+                Ok(meta)
+            }
             Err(e) if e.kind() == ErrorKind::NotFound => eyre::Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -143,5 +158,115 @@ impl InstanceMeta {
             .unwrap()
             .format("%b %e %Y")
             .to_string()
+    }
+}
+
+#[derive(Debug)]
+pub struct NoitaStats {
+    pub win_streak: u32,
+    pub win_streak_pb: u32,
+    pub wins: u32,
+    pub deaths: u32,
+}
+
+impl NoitaStats {
+    async fn read_salakieli(path: &Path) -> Result<Option<nxml_rs::Element>> {
+        match tokio::fs::read(path).await {
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            e => async {
+                let mut bytes = e?;
+
+                // surely 64 bit counter is enough
+                ctr::Ctr64BE::<Aes128>::new(b"SecretsOfTheAllS".into(), b"ThreeEyesAreWatc".into())
+                    .apply_keystream(&mut bytes);
+
+                let str = String::from_utf8(bytes.clone())?;
+                let elem = nxml_rs::parse(&str)?.to_owned();
+
+                eyre::Ok(Some(elem))
+            }
+            .await
+            .wrap_err_with(|| format!("Reading Noita stats ({})", path.display())),
+        }
+    }
+
+    pub async fn read(save_dir: &Path) -> Result<Option<Self>> {
+        let stats_dir = save_dir
+            .join("Nolla_Games_Noita")
+            .join("save00")
+            .join("stats");
+
+        let stats = stats_dir.join("_stats.salakieli");
+        let Some(stats) = Self::read_salakieli(&stats).await? else {
+            return Ok(None);
+        };
+
+        let win_streak_pb = stats
+            .as_ref()
+            .child("highest")
+            .and_then(|h| h.attr("streaks"))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default();
+
+        let deaths = stats
+            .as_ref()
+            .child("global")
+            .and_then(|h| h.attr("death_count"))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default();
+
+        let wins = stats
+            .as_ref()
+            .child("KEY_VALUE_STATS")
+            .map(|stats| {
+                // let stats = stats
+                //     .children("E")
+                //     .filter_map(|e| Some((e.attr("key")?, e.attr("value")?)))
+                //     .collect::<HashMap<_, _>>();
+
+                // let endroom_wins = stats
+                //     .get("progress_ending0")
+                //     .and_then(|s| s.parse::<u32>().ok())
+                //     .unwrap_or_default();
+
+                // let altar_wins = stats
+                //     .get("progress_ending1")
+                //     .and_then(|s| s.parse::<u32>().ok())
+                //     .unwrap_or_default();
+
+                // endroom_wins + altar_wins
+
+                let mut wins = 0;
+
+                for e in stats.children("E") {
+                    if let Some("progress_ending0") | Some("progress_ending1") = e.attr("key") {
+                        wins += e
+                            .attr("value")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .unwrap_or_default();
+                    }
+                }
+
+                wins
+            })
+            .unwrap_or_default();
+
+        let win_streak = Self::read_salakieli(&stats_dir.join("_streaks.salakieli"))
+            .await?
+            .as_ref()
+            .and_then(|gs| gs.attr("current_streak_count"))
+            .and_then(|c| c.parse::<u32>().ok())
+            .unwrap_or_default();
+
+        if win_streak + win_streak_pb + wins + deaths == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(NoitaStats {
+            win_streak,
+            win_streak_pb,
+            wins,
+            deaths,
+        }))
     }
 }
