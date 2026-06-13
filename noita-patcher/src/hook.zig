@@ -19,8 +19,11 @@ pub export fn DllMain(_: ?win.HINSTANCE, reason: u32, _: ?*anyopaque) callconv(.
     } else {
         std.log.debug("pinned self", .{});
     }
+
     return .TRUE;
 }
+
+var redirectPath: [:0]u16 = undefined;
 
 export fn install(path: [*:0]const u8) bool {
     installHook(path) catch |e| {
@@ -38,44 +41,85 @@ fn installHook(path: [*:0]const u8) !void {
     const wideLen = try std.unicode.utf8ToUtf16Le(S.buf[0 .. S.buf.len - 1], std.mem.span(path));
     redirectPath = S.buf[0..wideLen :0];
 
-    original = try patchIat("shell32.dll", "SHGetKnownFolderPath", &detour);
-}
+    try patchIat("shell32.dll", "SHGetKnownFolderPath", struct {
+        var original: *const @TypeOf(win.SHGetKnownFolderPath) = undefined;
 
-var redirectPath: [:0]u16 = undefined;
-var original: *const @TypeOf(detour) = undefined;
+        fn detour(
+            rfid: ?*const Guid,
+            dwFlags: u32,
+            hToken: ?win.HANDLE,
+            ppszPath: ?*?win.PWSTR,
+        ) callconv(.winapi) win.HRESULT {
+            std.log.debug("detoured SHGetKnownFolderPath called!", .{});
 
-fn detour(rfid: *const Guid, dwFlags: u32, hToken: ?win.HANDLE, ppszPath: *win.PWSTR) callconv(.winapi) win.HRESULT {
-    std.log.debug("detoured function called!", .{});
+            if (rfid == null or !std.mem.eql(u8, &rfid.?.Bytes, &win.FOLDERID_LocalAppDataLow.Bytes)) {
+                return original(rfid, dwFlags, hToken, ppszPath);
+            }
 
-    if (!std.mem.eql(u8, &rfid.Bytes, &win.FOLDERID_LocalAppDataLow.Bytes)) {
-        return original(rfid, dwFlags, hToken, ppszPath);
-    }
+            std.log.debug("redirecting LocalLow path to {f}", .{std.unicode.fmtUtf16Le(redirectPath)});
 
-    std.log.debug("redirecting LocalLow path to {f}", .{std.unicode.fmtUtf16Le(redirectPath)});
+            // callers of SHGetKnownFolderPath are expected to call CoTaskMemFree on the
+            // return, so we need to allocate our response through CoTaskMemAlloc to
+            // match
+            const dup: [*]u16 = @ptrCast(@alignCast(win.CoTaskMemAlloc((redirectPath.len + 1) * @sizeOf(u16)) orelse {
+                return win.E_OUTOFMEMORY;
+            }));
+            @memcpy(dup[0..redirectPath.len], redirectPath[0..redirectPath.len]);
+            dup[redirectPath.len] = 0;
 
-    // callers of SHGetKnownFolderPath are expected to call CoTaskMemFree on the
-    // return, so we need to allocate our response through CoTaskMemAlloc to
-    // match
-    const dup: [*]u16 = @ptrCast(@alignCast(win.CoTaskMemAlloc((redirectPath.len + 1) * @sizeOf(u16)) orelse {
-        return win.E_OUTOFMEMORY;
-    }));
-    @memcpy(dup[0..redirectPath.len], redirectPath[0..redirectPath.len]);
-    dup[redirectPath.len] = 0;
+            if (ppszPath) |out| {
+                out.* = dup[0..redirectPath.len :0];
+            }
 
-    ppszPath.* = dup[0..redirectPath.len :0];
+            return win.S_OK;
+        }
+    });
 
-    return win.S_OK;
+    try patchIat("kernel32.dll", "CreateProcessW", struct {
+        var original: *const @TypeOf(win.CreateProcessW) = undefined;
+
+        fn detour(
+            lpApplicationName: ?[*:0]const u16,
+            lpCommandLine: ?win.PWSTR,
+            lpProcessAttributes: ?*win.SECURITY_ATTRIBUTES,
+            lpThreadAttributes: ?*win.SECURITY_ATTRIBUTES,
+            bInheritHandles: win.BOOL,
+            dwCreationFlags: win.PROCESS_CREATION_FLAGS,
+            lpEnvironment: ?*anyopaque,
+            lpCurrentDirectory: ?[*:0]const u16,
+            lpStartupInfo: ?*win.STARTUPINFOW,
+            lpProcessInformation: ?*win.PROCESS_INFORMATION,
+        ) callconv(.winapi) win.BOOL {
+
+            // todo reroute starting noita.exe to trampoline yet again to have us reinserted
+
+            std.log.debug("detoured CreateProcessW called!", .{});
+            if (lpApplicationName) |appName| {
+                if (lpCommandLine) |cmdline| {
+                    std.log.debug("CreateProcessW({f}, {f})", .{
+                        std.unicode.fmtUtf16Le(std.mem.span(appName)),
+                        std.unicode.fmtUtf16Le(std.mem.span(cmdline)),
+                    });
+                }
+            }
+            return original(
+                lpApplicationName,
+                lpCommandLine,
+                lpProcessAttributes,
+                lpThreadAttributes,
+                bInheritHandles,
+                dwCreationFlags,
+                lpEnvironment,
+                lpCurrentDirectory,
+                lpStartupInfo,
+                lpProcessInformation,
+            );
+        }
+    });
 }
 
 // this is half-vibecoded to have an IAT patch instead of minhook, which explodes big time on GE-proton :sad:
-fn patchIat(targetDll: []const u8, targetName: []const u8, replacement: anytype) !@TypeOf(replacement) {
-    comptime {
-        const info = @typeInfo(@TypeOf(replacement));
-        if (info != .pointer or @typeInfo(info.pointer.child) != .@"fn") {
-            @compileError("expected a function pointer, got " ++ @typeName(@TypeOf(replacement)));
-        }
-    }
-
+fn patchIat(targetDll: []const u8, targetName: []const u8, stuff: anytype) !void {
     const base: [*]u8 = @ptrCast(win.GetModuleHandleW(null) orelse return error.NoMainModule);
 
     var image = try std.coff.Coff.init(base[0..0x1000], true);
@@ -98,8 +142,8 @@ fn patchIat(targetDll: []const u8, targetName: []const u8, replacement: anytype)
     defer _ = win.VirtualProtect(slot, @sizeOf(usize), prot, &prot);
 
     const orig = slot.*;
-    slot.* = @intFromPtr(replacement);
-    return @ptrFromInt(orig);
+    stuff.original = @ptrFromInt(orig);
+    slot.* = @intFromPtr(&stuff.detour);
 }
 
 fn findImportDir(base: [*]u8, table_rva: u32, targetDll: []const u8) ?*std.coff.ImportDirectoryEntry {
