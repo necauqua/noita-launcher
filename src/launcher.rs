@@ -324,8 +324,24 @@ impl NoitaLauncher {
                 PathBuf::from("Z:\\").join(path.strip_prefix("/").unwrap_or(path))
             }
 
+            let umu = dirs::data_dir()
+                .unwrap()
+                .join("umu")
+                .join("compatibilitytools")
+                .join("UMU-Latest");
+
+            // speed umu up by *not* checking for runtime updates
+            // noita literally works fine under vanilla wine, umu is just for 32bit libs and NixOS, meh
+            let proton_path = match std::env::var_os("PROTONPATH") {
+                Some(path) => path,
+                None if tokio::fs::try_exists(&umu).await? => umu.into_os_string(),
+                None => "UMU-Latest".into(),
+            };
+
             Command::new("umu-run")
                 .env("UMU_RUNTIME_UPDATE", "0")
+                .env("PROTONPATH", proton_path)
+                .env("SteamGameId", "881100")
                 .env("GAMEID", "umu-881100")
                 .env("WINEPREFIX", self.app_dir.join("wineprefix"))
                 .env("WINEDEBUG", "-all,+debugstr")
