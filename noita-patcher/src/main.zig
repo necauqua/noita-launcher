@@ -2,6 +2,8 @@ const std = @import("std");
 
 const win = @import("win32").everything;
 
+const InstallArgs = @import("shared.zig").InstallArgs;
+
 /// Load the DLL locally to get the proc address and then rebase it on top of the remote base
 fn remoteProcAddress(dllPath: [*:0]const u16, module: win.HINSTANCE, procName: [*:0]const u8) ?*const anyopaque {
     const local = win.LoadLibraryExW(dllPath, null, .{ .DONT_RESOLVE_DLL_REFERENCES = 1 }) orelse return null;
@@ -39,7 +41,7 @@ fn loadLibraryRemote(proc: win.HANDLE, dll_path: [:0]const u16) !win.HINSTANCE {
         return error.NoLoadLibraryW;
     };
 
-    var remoteArg = try RemoteMem.wrap(proc, std.mem.sliceAsBytes(std.mem.absorbSentinel(dll_path)));
+    var remoteArg = try RemoteMem.wstr(proc, dll_path);
     defer remoteArg.deinit();
 
     // All same-arch processes share the same kernel32 and so the LoadLibraryW
@@ -66,14 +68,15 @@ fn run(init: std.process.Init) !u32 {
         std.log.debug("bad args, expected: noita-trampoline.exe <noita-exe> <path-hook-dll> <save-path> [noita args...]", .{});
         return 1;
     }
-    const noitaExe = argv[1];
-    const hookDll = argv[2];
-    const savePath = argv[3];
+    const trampolineExe = argv[0];
+    const hookDll = argv[1];
+    const savePath = argv[2];
+    const noitaExe = argv[3];
     const noitaArgs = argv[4..];
 
-    std.log.debug("noitaExe: {s}", .{noitaExe});
     std.log.debug("hookDll: {s}", .{hookDll});
     std.log.debug("savePath: {s}", .{savePath});
+    std.log.debug("noitaExe: {s}", .{noitaExe});
     std.log.debug("noitaArgs: {s}", .{try std.mem.join(arena, " ", noitaArgs)});
 
     // meh this is good enough
@@ -88,11 +91,16 @@ fn run(init: std.process.Init) !u32 {
 
     var si = std.mem.zeroes(win.STARTUPINFOW);
     si.cb = @sizeOf(win.STARTUPINFOW);
+    si.dwFlags = .{ .FORCEOFFFEEDBACK = 1 }; // dont show cursor as busy
+
     var pi = std.mem.zeroes(win.PROCESS_INFORMATION);
 
-    if (win.CreateProcessW(null, cmdlineWide.ptr, null, null, 0, .{ .CREATE_SUSPENDED = 1 }, null, null, &si, &pi) == 0) {
+    const app = std.unicode.utf8ToUtf16LeStringLiteral("noita.exe");
+
+    if (win.CreateProcessW(app.ptr, cmdlineWide.ptr, null, null, 0, .{ .CREATE_SUSPENDED = 1 }, null, null, &si, &pi) == 0) {
         fail("CreateProcessW(noita.exe)");
     }
+
     errdefer _ = win.TerminateProcess(pi.hProcess, 1);
     defer _ = win.CloseHandle(pi.hThread);
     defer _ = win.CloseHandle(pi.hProcess);
@@ -104,9 +112,12 @@ fn run(init: std.process.Init) !u32 {
     const hookDllWide = try std.unicode.utf8ToUtf16LeAllocZ(arena, hookDll);
     const handle = try loadLibraryRemote(proc, hookDllWide);
 
-    // basically just append 0
-    const savePathArg = std.mem.absorbSentinel(try arena.dupeSentinel(u8, savePath, 0));
-    var remoteArg = try RemoteMem.wrap(proc, savePathArg);
+    const args = InstallArgs{
+        .trampoline_path = try remotePath(arena, proc, trampolineExe),
+        .save_path = try remotePath(arena, proc, savePath),
+        .dll_path = try remotePath(arena, proc, hookDll),
+    };
+    var remoteArg = try RemoteMem.wrap(proc, std.mem.asBytes(&args));
     defer remoteArg.deinit();
 
     const installAddr = remoteProcAddress(hookDllWide, handle, "install") orelse {
@@ -143,19 +154,33 @@ fn fail(msg: []const u8) noreturn {
     std.process.exit(1);
 }
 
+fn remotePath(arena: std.mem.Allocator, proc: win.HANDLE, utf8: []const u8) !@import("shared.zig").Path {
+    const wide = try std.unicode.utf8ToUtf16LeAllocZ(arena, utf8);
+    // meh we just leak it and treat as static in the DLL
+    const remote = try RemoteMem.wstr(proc, wide);
+    return @import("shared.zig").Path{
+        .ptr = @ptrCast(@alignCast(remote.ptr)), // ugh on this side the pointer is invalid ofc ew
+        .len = wide.len,
+    };
+}
+
 const RemoteMem = struct {
     proc: win.HANDLE,
     ptr: *anyopaque,
     size: usize,
 
-    pub fn wrap(proc: win.HANDLE, data: []const u8) error{ VirtualAllocFailed, WriteProcessMemoryFailed, WriteProcessMemoryShort }!RemoteMem {
+    pub fn wrap(proc: win.HANDLE, data: []const u8) !RemoteMem {
         var mem = try RemoteMem.alloc(proc, data.len);
         errdefer mem.deinit();
         try mem.write(data);
         return mem;
     }
 
-    pub fn alloc(proc: win.HANDLE, size: usize) error{VirtualAllocFailed}!RemoteMem {
+    pub fn wstr(proc: win.HANDLE, str: [:0]const u16) !RemoteMem {
+        return .wrap(proc, std.mem.sliceAsBytes(std.mem.absorbSentinel(str)));
+    }
+
+    pub fn alloc(proc: win.HANDLE, size: usize) !RemoteMem {
         const ptr = win.VirtualAllocEx(
             proc,
             null,
@@ -166,7 +191,7 @@ const RemoteMem = struct {
         return .{ .proc = proc, .ptr = ptr, .size = size };
     }
 
-    pub fn write(self: RemoteMem, data: []const u8) error{ WriteProcessMemoryFailed, WriteProcessMemoryShort }!void {
+    pub fn write(self: RemoteMem, data: []const u8) !void {
         var written: usize = 0;
         if (win.WriteProcessMemory(self.proc, self.ptr, data.ptr, data.len, &written) == win.FALSE) {
             return error.WriteProcessMemoryFailed;

@@ -3,6 +3,8 @@ const std = @import("std");
 const Guid = @import("win32").zig.Guid;
 const win = @import("win32").everything;
 
+const InstallArgs = @import("shared.zig").InstallArgs;
+
 pub const std_options = std.Options{ .logFn = @import("log.zig").mkLog("noita-path-hook") };
 
 pub export fn DllMain(_: ?win.HINSTANCE, reason: u32, _: ?*anyopaque) callconv(.winapi) std.os.windows.BOOL {
@@ -23,24 +25,23 @@ pub export fn DllMain(_: ?win.HINSTANCE, reason: u32, _: ?*anyopaque) callconv(.
     return .TRUE;
 }
 
-var redirectPath: [:0]u16 = undefined;
+var args: InstallArgs = undefined;
 
-export fn install(path: [*:0]const u8) bool {
-    installHook(path) catch |e| {
+export fn install(_args: *InstallArgs) bool {
+    args = _args.*;
+    std.log.debug("hook install called; trampoline_path={f}, save_path={f}, dll_path={f}", .{
+        args.trampoline_path,
+        args.save_path,
+        args.dll_path,
+    });
+    installHook() catch |e| {
         std.log.debug("failed to install hook: {s}", .{@errorName(e)});
         return false;
     };
-    std.log.debug("hook installed, redirecting LocalLow to {f}", .{std.unicode.fmtUtf16Le(redirectPath)});
     return true;
 }
 
-fn installHook(path: [*:0]const u8) !void {
-    const S = struct {
-        var buf = std.mem.zeroes([1024:0]u16);
-    };
-    const wideLen = try std.unicode.utf8ToUtf16Le(S.buf[0 .. S.buf.len - 1], std.mem.span(path));
-    redirectPath = S.buf[0..wideLen :0];
-
+fn installHook() !void {
     try patchIat("shell32.dll", "SHGetKnownFolderPath", struct {
         var original: *const @TypeOf(win.SHGetKnownFolderPath) = undefined;
 
@@ -50,25 +51,25 @@ fn installHook(path: [*:0]const u8) !void {
             hToken: ?win.HANDLE,
             ppszPath: ?*?win.PWSTR,
         ) callconv(.winapi) win.HRESULT {
-            std.log.debug("detoured SHGetKnownFolderPath called!", .{});
+            std.log.debug("detoured SHGetKnownFolderPath called", .{});
 
             if (rfid == null or !std.mem.eql(u8, &rfid.?.Bytes, &win.FOLDERID_LocalAppDataLow.Bytes)) {
                 return original(rfid, dwFlags, hToken, ppszPath);
             }
 
-            std.log.debug("redirecting LocalLow path to {f}", .{std.unicode.fmtUtf16Le(redirectPath)});
+            std.log.debug("redirecting LocalLow path to {f}", .{args.save_path});
 
             // callers of SHGetKnownFolderPath are expected to call CoTaskMemFree on the
             // return, so we need to allocate our response through CoTaskMemAlloc to
             // match
-            const dup: [*]u16 = @ptrCast(@alignCast(win.CoTaskMemAlloc((redirectPath.len + 1) * @sizeOf(u16)) orelse {
+            const dup: [*]u16 = @ptrCast(@alignCast(win.CoTaskMemAlloc((args.save_path.len + 1) * @sizeOf(u16)) orelse {
                 return win.E_OUTOFMEMORY;
             }));
-            @memcpy(dup[0..redirectPath.len], redirectPath[0..redirectPath.len]);
-            dup[redirectPath.len] = 0;
+            @memcpy(dup[0..args.save_path.len], args.save_path.span());
+            dup[args.save_path.len] = 0;
 
             if (ppszPath) |out| {
-                out.* = dup[0..redirectPath.len :0];
+                out.* = dup[0..args.save_path.len :0];
             }
 
             return win.S_OK;
@@ -90,21 +91,43 @@ fn installHook(path: [*:0]const u8) !void {
             lpStartupInfo: ?*win.STARTUPINFOW,
             lpProcessInformation: ?*win.PROCESS_INFORMATION,
         ) callconv(.winapi) win.BOOL {
+            std.log.debug("detoured CreateProcessW called", .{});
 
-            // todo reroute starting noita.exe to trampoline yet again to have us reinserted
+            var buf: [1024]u16 = undefined;
+            var patchedAppName = lpApplicationName;
+            var patchedCmdline = lpCommandLine;
 
-            std.log.debug("detoured CreateProcessW called!", .{});
             if (lpApplicationName) |appName| {
                 if (lpCommandLine) |cmdline| {
-                    std.log.debug("CreateProcessW({f}, {f})", .{
-                        std.unicode.fmtUtf16Le(std.mem.span(appName)),
-                        std.unicode.fmtUtf16Le(std.mem.span(cmdline)),
-                    });
+                    if (std.mem.eql(u16, std.mem.span(appName), std.unicode.utf8ToUtf16LeStringLiteral("noita.exe"))) {
+                        const res = w: {
+                            var w = std.Io.Writer.fixed(std.mem.sliceAsBytes(&buf));
+                            const space = std.mem.sliceAsBytes(&[_]u16{' '});
+                            w.writeAll(args.trampoline_path.bytes()) catch |e| break :w e;
+                            w.writeAll(space) catch |e| break :w e;
+                            w.writeAll(args.dll_path.bytes()) catch |e| break :w e;
+                            w.writeAll(space) catch |e| break :w e;
+                            w.writeAll(args.save_path.bytes()) catch |e| break :w e;
+                            w.writeAll(space) catch |e| break :w e;
+                            w.writeAll(std.mem.sliceAsBytes(std.mem.span(cmdline))) catch |e| break :w e;
+                            w.writeAll(std.mem.sliceAsBytes(&[_]u16{0})) catch |e| break :w e;
+                        };
+                        res catch |e| {
+                            std.log.debug("failed to build patched command line: {s}", .{@errorName(e)});
+                            std.process.exit(1);
+                        };
+
+                        patchedCmdline = @ptrCast(&buf);
+                        patchedAppName = args.trampoline_path.ptr;
+
+                        std.log.debug("patched cmdline: {f}", .{std.unicode.fmtUtf16Le(std.mem.span(patchedCmdline.?))});
+                    }
                 }
             }
+
             return original(
-                lpApplicationName,
-                lpCommandLine,
+                patchedAppName,
+                patchedCmdline,
                 lpProcessAttributes,
                 lpThreadAttributes,
                 bInheritHandles,
@@ -118,7 +141,6 @@ fn installHook(path: [*:0]const u8) !void {
     });
 }
 
-// this is half-vibecoded to have an IAT patch instead of minhook, which explodes big time on GE-proton :sad:
 fn patchIat(targetDll: []const u8, targetName: []const u8, stuff: anytype) !void {
     const base: [*]u8 = @ptrCast(win.GetModuleHandleW(null) orelse return error.NoMainModule);
 

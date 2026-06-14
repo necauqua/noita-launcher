@@ -305,9 +305,9 @@ impl NoitaLauncher {
         #[cfg(windows)]
         {
             Command::new(&self.trampoline)
-                .arg("noita.exe")
                 .arg(&self.hook_dll)
                 .arg(save_path)
+                .arg("noita.exe")
                 .args(meta.noita_args)
                 .current_dir(instance_dir.join("Noita"))
                 .spawn()?
@@ -325,14 +325,15 @@ impl NoitaLauncher {
             }
 
             Command::new("umu-run")
+                .env("UMU_RUNTIME_UPDATE", "0")
                 .env("GAMEID", "umu-881100")
                 .env("WINEPREFIX", self.app_dir.join("wineprefix"))
                 .env("WINEDEBUG", "-all,+debugstr")
                 .env("WINEDLLOVERRIDES", "winmm=n,b") // allow winmm.dll to be used for an asi loader
                 .arg(&self.trampoline)
-                .arg("noita.exe")
                 .arg(to_wine(&self.hook_dll))
                 .arg(to_wine(&save_path))
+                .arg("noita.exe")
                 .args(meta.noita_args)
                 .current_dir(instance_dir.join("Noita"))
                 .spawn()
