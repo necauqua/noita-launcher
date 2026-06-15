@@ -77,24 +77,24 @@ impl ProgressCallback for indicatif::ProgressBar {
     }
 }
 
-pub struct InstanceDownloaderState {
-    pub depot: Depot,
+pub struct VersionDownloaderState {
+    depot: Depot,
     cache: PathBuf,
     cdn: CdnDownloader,
 }
 
 #[derive(Clone)]
-pub struct InstanceDownloader(Arc<InstanceDownloaderState>);
+pub struct VersionDownloader(Arc<VersionDownloaderState>);
 
-impl Deref for InstanceDownloader {
-    type Target = InstanceDownloaderState;
+impl Deref for VersionDownloader {
+    type Target = VersionDownloaderState;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl InstanceDownloader {
+impl VersionDownloader {
     pub fn new(
         depot: Depot,
         cdn_hosts: Arc<[String]>,
@@ -102,7 +102,7 @@ impl InstanceDownloader {
         http: reqwest::Client,
         parallelism: usize,
     ) -> Self {
-        Self(Arc::new(InstanceDownloaderState {
+        Self(Arc::new(VersionDownloaderState {
             depot,
             cache,
             cdn: CdnDownloader::new(cdn_hosts, http, parallelism),

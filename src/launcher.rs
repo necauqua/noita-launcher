@@ -17,9 +17,9 @@ use steam_vent::auth::GuardTokenType;
 use steam_vent::auth::SteamGuardToken;
 use steam_vent_proto::content_manifest::content_manifest_payload::FileMapping;
 
-use crate::download::InstanceDownloader;
+use crate::download::VersionDownloader;
 use crate::meta::InstanceMeta;
-use crate::meta::SaveMeta;
+use crate::meta::VersionMeta;
 use crate::printer::Printer;
 use crate::steam::Steam;
 use crate::user_bail;
@@ -89,13 +89,13 @@ impl AuthConfirmationHandler for SteamTwoFactor {
 //     noita-path-hook.dll
 //     noita-trampoline.exe
 //     wineprefix/ - WINEPREFIX on linux
-//     temp/<name>.<random>/ - temporary instance dirs used during download
-//     instances/<name>/ - instance dir, cwd for a particular Noita version
-//       meta.toml - our per-instance settings and metadata
+//     temp/<name>.<random>/ - temporary version dirs used during download
+//     versions/<name>/ - version dir, cwd for a particular Noita version
+//       meta.toml - our per-version settings and metadata
 //       Noita/.. - game cwd
-//     saves/<name>/ - a single save dir
-//       meta.toml - our per-save settings
-//       Nolla_Games_Noita/.. - Noita seed the save folder as the appdata, so it uses this folder
+//     instances/<name>/ - a single instance dir
+//       meta.toml - our per-instance settings
+//       Nolla_Games_Noita/.. - we make Noita see the instance folder as the appdata, so it uses its folder for the save+configs
 
 pub struct NoitaLauncher {
     app_dir: PathBuf,
@@ -105,7 +105,7 @@ pub struct NoitaLauncher {
     printer: Printer,
     steam: Option<Steam>,
     http: Option<reqwest::Client>,
-    downloader: Option<InstanceDownloader>,
+    downloader: Option<VersionDownloader>,
 }
 
 const APP_ID: u32 = 881100;
@@ -181,7 +181,7 @@ impl NoitaLauncher {
         }
     }
 
-    async fn downloader(&mut self) -> eyre::Result<InstanceDownloader> {
+    async fn downloader(&mut self) -> eyre::Result<VersionDownloader> {
         // and again
         if self.downloader.is_some() {
             return Ok(self.downloader.as_mut().unwrap().clone());
@@ -197,7 +197,7 @@ impl NoitaLauncher {
 
         Ok(self
             .downloader
-            .insert(InstanceDownloader::new(
+            .insert(VersionDownloader::new(
                 depot,
                 cdn_hosts,
                 chunk_cache,
@@ -251,56 +251,55 @@ impl NoitaLauncher {
     pub async fn run_instance(
         &mut self,
         instance: &str,
-        save: &str,
+        version_override: Option<&str>,
         force: bool,
     ) -> eyre::Result<()> {
-        let instance_dir = self.app_dir.join("instances").join(instance);
+        let instance_path = self.app_dir.join("instances").join(instance);
+        tokio::fs::create_dir_all(&instance_path)
+            .await
+            .wrap_err_with(|| format!("Creating instance dir ({})", instance_path.display()))?;
 
-        let mut fresh = false;
+        let version = match InstanceMeta::read(&instance_path).await? {
+            Some(mut meta) => {
+                if let Some(version_override) = version_override {
+                    if force {
+                        self.printer
+                            .hint(format!("Overriding instance '{instance}' to now use version '{version_override}' instead of '{}'", meta.version));
+                        meta.version = version_override.into();
+                        meta.write(&instance_path).await?;
+                    } else {
+                        user_bail!(
+                            "Instance '{instance}' already exists and is associated with version '{}'",
+                            hint = "Use --force to override the version for this instance",
+                            meta.version,
+                        );
+                    }
+                }
+                meta.version
+            }
+            None => {
+                let version = version_override.unwrap_or("main").into();
+                let meta = InstanceMeta::new(version);
+                meta.write(&instance_path).await?;
+                meta.version
+            }
+        };
 
-        let meta = if !tokio::fs::try_exists(&instance_dir).await? {
-            if instance != "main" {
+        let version_dir = self.app_dir.join("versions").join(&version);
+
+        let meta = if !tokio::fs::try_exists(&version_dir).await? {
+            if version != "main" {
                 user_bail!(
-                    "Instance '{instance}' does not exist",
+                    "Version '{version}' does not exist",
                     hint = "Run `noita new` first",
                 );
             }
             self.printer
-                .hint("Default instance 'main' does not exist, setting it up..");
-            fresh = true;
-            self.new_instance(instance, None, None, false).await?
+                .hint("Default version 'main' does not exist, setting it up..");
+            self.new_version(&version, None, None, false).await?
         } else {
-            InstanceMeta::read(&instance_dir).await?
+            VersionMeta::read(&version_dir).await?
         };
-
-        let save_path = self.app_dir.join("saves").join(save);
-        tokio::fs::create_dir_all(&save_path)
-            .await
-            .wrap_err_with(|| format!("Creating dir ({})", save_path.display()))?;
-
-        if let Some(mut meta) = SaveMeta::read(&save_path).await? {
-            if meta.instance != instance {
-                if force {
-                    meta.instance = instance.into();
-                    meta.write(&save_path).await?;
-                    self.printer.warn(format!(
-                        "Overriding save '{save}' to be associated with instance '{instance}' (was associated with '{}')", meta.instance
-                    ));
-                } else {
-                    user_bail!(
-                        "Save '{save}' is associated with a different instance",
-                        hint = "Use `noita run -f/--force` to ignore this check (this will override the associated instance)",
-                    );
-                }
-            }
-        } else {
-            if !fresh {
-                self.printer.warn(format!(
-                    "Save {save} did not have meta.toml, creating one associated with '{instance}'"
-                ));
-            }
-            SaveMeta::new(instance.into()).write(&save_path).await?
-        }
 
         #[cfg(windows)]
         {
@@ -309,7 +308,7 @@ impl NoitaLauncher {
                 .arg(save_path)
                 .arg("noita.exe")
                 .args(meta.noita_args)
-                .current_dir(instance_dir.join("Noita"))
+                .current_dir(version_dir.join("Noita"))
                 .spawn()?
                 .wait()
                 .await?;
@@ -348,10 +347,10 @@ impl NoitaLauncher {
                 .env("WINEDLLOVERRIDES", "winmm=n,b") // allow winmm.dll to be used for an asi loader
                 .arg(&self.trampoline)
                 .arg(to_wine(&self.hook_dll))
-                .arg(to_wine(&save_path))
+                .arg(to_wine(&instance_path))
                 .arg("noita.exe")
                 .args(meta.noita_args)
-                .current_dir(instance_dir.join("Noita"))
+                .current_dir(version_dir.join("Noita"))
                 .spawn()
                 .wrap_err("Running the game with umu-run")
                 .note("Running on non-Windows requires umu-launcher to be installed (umu-run in PATH)")?
@@ -361,19 +360,19 @@ impl NoitaLauncher {
         Ok(())
     }
 
-    pub async fn new_instance(
+    pub async fn new_version(
         &mut self,
         name: &str,
         manifest: Option<u64>,
         branch: Option<&str>,
         validate: bool,
-    ) -> eyre::Result<InstanceMeta> {
-        let instances_path = self.app_dir.join("instances");
-        tokio::fs::create_dir_all(&instances_path).await?;
+    ) -> eyre::Result<VersionMeta> {
+        let versions_path = self.app_dir.join("versions");
+        tokio::fs::create_dir_all(&versions_path).await?;
 
-        let instance_path = instances_path.join(name);
-        if tokio::fs::try_exists(&instance_path).await? {
-            user_bail!("Instance '{name}' already exists");
+        let version_path = versions_path.join(name);
+        if tokio::fs::try_exists(&version_path).await? {
+            user_bail!("Version '{name}' already exists");
         }
 
         let (size, manifest, mappings) = self.prepare_download(manifest, branch).await?;
@@ -402,23 +401,23 @@ impl NoitaLauncher {
             .printer
             .bar(download_size)
             .with_prefix("Downloading chunks");
-        let write_bar = self.printer.bar(size).with_prefix("Writing instance files");
+        let write_bar = self.printer.bar(size).with_prefix("Writing version files");
 
         downloader
             .fetch(mappings, &temp_path, download_bar, write_bar)
             .await?;
 
-        let instance_cwd = instance_path.join("Noita");
+        let noita_cwd = version_path.join("Noita");
 
-        if tokio::fs::try_exists(&instance_cwd).await? {
+        if tokio::fs::try_exists(&noita_cwd).await? {
             tokio::fs::remove_dir_all(&temp_path).await?;
-            user_bail!("Instance '{name}' was created during the download, aborting",);
+            user_bail!("Version '{name}' was created during the download, aborting",);
         }
-        tokio::fs::create_dir_all(&instance_path).await?;
-        tokio::fs::rename(temp_path, instance_cwd).await?;
+        tokio::fs::create_dir_all(&version_path).await?;
+        tokio::fs::rename(temp_path, noita_cwd).await?;
 
-        let meta = InstanceMeta::new(vec!["-no_logo_splashes".into()], manifest);
-        meta.write(&instance_path.join("meta.toml")).await?;
+        let meta = VersionMeta::new(vec!["-no_logo_splashes".into()], manifest);
+        meta.write(&version_path.join("meta.toml")).await?;
         Ok(meta)
     }
 
@@ -503,14 +502,14 @@ impl NoitaLauncher {
         Ok(())
     }
 
-    pub async fn remove_instances(&mut self, names: &[String]) -> eyre::Result<()> {
+    pub async fn remove_versions(&mut self, names: &[String]) -> eyre::Result<()> {
         for name in names {
-            let instance_dir = self.app_dir.join("instances").join(name);
-            if tokio::fs::try_exists(&instance_dir).await? {
-                tokio::fs::remove_dir_all(instance_dir).await?;
+            let version_dir = self.app_dir.join("versions").join(name);
+            if tokio::fs::try_exists(&version_dir).await? {
+                tokio::fs::remove_dir_all(version_dir).await?;
             } else {
                 self.printer
-                    .warn(format!("Instance '{name}' does not exist"));
+                    .warn(format!("Version '{name}' does not exist"));
             }
         }
 
@@ -518,11 +517,10 @@ impl NoitaLauncher {
     }
 
     // todo: list some stats, like number of installed mods etc
-    // ( + manifest id mb? get noita build string from noita.exe, or some _version_hash.txt matching bs)
-    pub async fn list_instances(&self) -> eyre::Result<Vec<(String, InstanceMeta)>> {
+    pub async fn list_versions(&self) -> eyre::Result<Vec<(String, VersionMeta)>> {
         let mut result = vec![];
 
-        let mut entries = match tokio::fs::read_dir(self.app_dir.join("instances")).await {
+        let mut entries = match tokio::fs::read_dir(self.app_dir.join("versions")).await {
             Err(e) if e.kind() == ErrorKind::NotFound => None,
             e => Some(e?),
         };
@@ -530,7 +528,7 @@ impl NoitaLauncher {
             while let Some(entry) = entries.next_entry().await? {
                 result.push((
                     entry.file_name().to_string_lossy().into_owned(),
-                    InstanceMeta::read(&entry.path()).await?,
+                    VersionMeta::read(&entry.path()).await?,
                 ));
             }
         }
@@ -541,8 +539,8 @@ impl NoitaLauncher {
     // todo list some save info, like
     //   global stats (d/w/cur/pb/playtime),
     //   local stats (current biome, session playtime, seed etc)
-    pub async fn list_saves(&self) -> eyre::Result<Vec<(String, SaveMeta)>> {
-        let mut entries = match tokio::fs::read_dir(self.app_dir.join("saves")).await {
+    pub async fn list_instances(&self) -> eyre::Result<Vec<(String, InstanceMeta)>> {
+        let mut entries = match tokio::fs::read_dir(self.app_dir.join("instances")).await {
             Err(e) if e.kind() == ErrorKind::NotFound => None,
             e => Some(e?),
         };
@@ -553,7 +551,7 @@ impl NoitaLauncher {
             while let Some(entry) = entries.next_entry().await? {
                 result.push((
                     entry.file_name().to_string_lossy().into_owned(),
-                    match SaveMeta::read(&entry.path()).await? {
+                    match InstanceMeta::read(&entry.path()).await? {
                         Some(meta) => meta,
                         None => continue,
                     },

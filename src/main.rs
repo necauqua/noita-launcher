@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use clap::ColorChoice;
 use clap::Parser;
 use color_eyre::Section;
@@ -6,7 +8,6 @@ use inquire::InquireError;
 use noita_launcher::error::UserError;
 use noita_launcher::launcher::NoitaLauncher;
 use noita_launcher::printer::Printer;
-use std::fmt::Write as _;
 use yansi::Condition;
 use yansi::Paint;
 
@@ -45,15 +46,15 @@ struct LoginArgs {
     stdin_password: bool,
 }
 
-/// Run a Noita instance. Creates the default instance first if it does not exist.
+/// Run a Noita instance. Creates the default instance (called `main`) first if it does not exist.
 #[derive(clap::Parser)]
 struct RunArgs {
-    /// Instance name to run
+    /// Instance to run; defaults to `main`
     #[clap(default_value = "main")]
     instance: String,
-    /// Save slot to use
-    #[clap(default_value = "main")]
-    save: String,
+    /// Version to use to run the instance. Without `--force`, only when creating new instances.
+    version: Option<String>,
+    /// Override the version association of an existing instance.
     #[clap(short, long)]
     force: bool,
 }
@@ -91,10 +92,10 @@ struct FetchAllArgs {
     validate: bool,
 }
 
-/// Delete an instance directory.
+/// Delete a version.
 #[derive(clap::Parser)]
-struct RemoveArgs {
-    /// Names of the instances to delete
+struct RemoveVersionArgs {
+    /// Names of the versions to delete
     #[clap(required = true)]
     names: Vec<String>,
 }
@@ -115,12 +116,12 @@ enum Subcommand {
     PrefetchAll(FetchAllArgs),
     /// Delete an instance directory
     #[clap(visible_alias = "rm")]
-    Remove(RemoveArgs),
-    /// List all installed instances
+    RemoveVersion(RemoveVersionArgs),
+    /// List all instances
     #[clap(visible_alias = "ls")]
     List,
-    /// List all save slots
-    Saves,
+    /// List all set up versions
+    Versions,
 }
 
 async fn dispatch_cli(
@@ -157,12 +158,12 @@ async fn dispatch_cli(
         Subcommand::Logout => launcher.logout().await?,
         Subcommand::Run(args) => {
             launcher
-                .run_instance(&args.instance, &args.save, args.force)
+                .run_instance(&args.instance, args.version.as_deref(), args.force)
                 .await?
         }
         Subcommand::New(args) => {
             launcher
-                .new_instance(
+                .new_version(
                     &args.name,
                     args.fetch.manifest,
                     args.fetch.branch.as_deref(),
@@ -176,22 +177,24 @@ async fn dispatch_cli(
                 .await?
         }
         Subcommand::PrefetchAll(args) => launcher.prefetch_all(args.validate).await?,
-        Subcommand::Remove(args) => launcher.remove_instances(&args.names).await?,
-        Subcommand::List => {
-            let instances = launcher.list_instances().await?;
+        Subcommand::RemoveVersion(args) => launcher.remove_versions(&args.names).await?,
+        Subcommand::Versions => {
+            let mut versions = launcher.list_versions().await?;
 
-            if instances.is_empty() {
-                printer.hint("No instances found, run `noita new` to create one");
+            if versions.is_empty() {
+                printer.hint("No versions found, run `noita new` to create one");
                 return Ok(());
             }
 
-            let max_name_len = instances
+            let max_name_len = versions
                 .iter()
                 .map(|(n, _)| n.len())
                 .max()
                 .unwrap_or_default();
 
-            for (name, meta) in instances {
+            versions.sort_by_key(|(_, meta)| meta.order);
+
+            for (name, meta) in versions {
                 println!(
                     "{:width$} {} ({})",
                     name.bold(),
@@ -201,17 +204,23 @@ async fn dispatch_cli(
                 );
             }
         }
-        Subcommand::Saves => {
-            let saves = launcher.list_saves().await?;
+        Subcommand::List => {
+            let mut instances = launcher.list_instances().await?;
 
-            if saves.is_empty() {
-                printer.hint("No saves found, run an instance (with `noita run`)");
+            if instances.is_empty() {
+                printer.hint("No instances found, run an instance (with `noita run`)");
                 return Ok(());
             }
 
-            let max_name_len = saves.iter().map(|(n, _)| n.len()).max().unwrap_or_default();
+            let max_name_len = instances
+                .iter()
+                .map(|(n, _)| n.len())
+                .max()
+                .unwrap_or_default();
 
-            for (name, meta) in saves {
+            instances.sort_by_key(|(_, meta)| meta.order);
+
+            for (name, meta) in instances {
                 let s = match meta.stats {
                     None => Default::default(),
                     Some(stats) => {
@@ -239,7 +248,7 @@ async fn dispatch_cli(
                 println!(
                     "{:width$} ({}){s}",
                     name.bold(),
-                    meta.instance.dim(),
+                    meta.version.dim(),
                     width = max_name_len,
                 );
             }

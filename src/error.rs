@@ -9,9 +9,9 @@ pub struct UserError {
 
 #[macro_export]
 macro_rules! user_bail {
-    ($message:expr, hint=$hint:expr $(,$arg:tt)* $(,)?) => {
+    ($message:expr, hint=$hint:expr $(, $($arg:tt)*)?) => {
         return Err(::eyre::eyre!($crate::error::UserError {
-            message: format!($message, $($arg)*),
+            message: format!($message $(, $($arg)*)*),
             hint: Some($hint.into()),
         }));
     };

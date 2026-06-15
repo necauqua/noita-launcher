@@ -1,7 +1,7 @@
 # noita-launcher
 
 A CLI (for now; a GUI is an immediate todo) tool for managing multiple isolated
-instances and saves of [Noita](https://noitagame.com/).
+versions and instances of [Noita](https://noitagame.com/).
 
 Downloads game files directly from Steam depots without requiring the Steam
 client to be running, allowing to run any historial version of the game with

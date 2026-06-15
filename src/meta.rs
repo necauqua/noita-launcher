@@ -1,3 +1,6 @@
+use std::io::ErrorKind;
+use std::path::Path;
+
 use aes::Aes128;
 use aes::cipher::KeyIvInit;
 use aes::cipher::StreamCipher;
@@ -9,8 +12,6 @@ use eyre::bail;
 use eyre::eyre;
 use serde::Deserialize;
 use serde::Serialize;
-use std::io::ErrorKind;
-use std::path::Path;
 use tokio::io::AsyncReadExt;
 
 #[derive(Debug, Deserialize)]
@@ -41,8 +42,8 @@ fn is_zero(n: &u32) -> bool {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct SaveMeta {
-    pub instance: String,
+pub struct InstanceMeta {
+    pub version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default = "zero", skip_serializing_if = "is_zero")]
@@ -52,10 +53,10 @@ pub struct SaveMeta {
     pub stats: Option<NoitaStats>,
 }
 
-impl SaveMeta {
+impl InstanceMeta {
     pub fn new(instance: String) -> Self {
         Self {
-            instance,
+            version: instance,
             description: None,
             order: 0,
             stats: None,
@@ -79,19 +80,19 @@ impl SaveMeta {
             Err(e) if e.kind() == ErrorKind::NotFound => eyre::Ok(None),
             Err(e) => Err(e.into()),
         }
-        .wrap_err_with(|| format!("Reading save metadata ({})", path.display()))
+        .wrap_err_with(|| format!("Reading instance metadata ({})", path.display()))
     }
 
     pub async fn write(&self, save_dir: &Path) -> Result<()> {
         let path = save_dir.join("meta.toml");
         tokio::fs::write(&path, toml::to_string(self)?)
             .await
-            .wrap_err_with(|| format!("Writing save metadata ({})", path.display()))
+            .wrap_err_with(|| format!("Writing instance metadata ({})", path.display()))
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct InstanceMeta {
+pub struct VersionMeta {
     pub noita_args: Vec<String>,
     pub steam_manifest: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,7 +104,7 @@ pub struct InstanceMeta {
     pub pe_timestamp: u32,
 }
 
-impl InstanceMeta {
+impl VersionMeta {
     pub fn new(noita_args: Vec<String>, steam_manifest: u64) -> Self {
         Self {
             noita_args,
@@ -121,7 +122,7 @@ impl InstanceMeta {
             // Err(e) if e.kind() == ErrorKind::NotFound => {},
             Err(e) => Err(e.into()),
         }
-        .wrap_err_with(|| format!("Reading instance metadata ({})", path.display()))?;
+        .wrap_err_with(|| format!("Reading version metadata ({})", path.display()))?;
 
         let path = instance_dir.join("Noita").join("noita.exe");
 
@@ -149,7 +150,7 @@ impl InstanceMeta {
     pub async fn write(&self, path: &Path) -> Result<()> {
         tokio::fs::write(&path, toml::to_string(self)?)
             .await
-            .wrap_err_with(|| format!("Writing instance metadata ({})", path.display()))
+            .wrap_err_with(|| format!("Writing version metadata ({})", path.display()))
     }
 
     pub fn human_timestamp(&self) -> String {
@@ -190,8 +191,8 @@ impl NoitaStats {
         }
     }
 
-    pub async fn read(save_dir: &Path) -> Result<Option<Self>> {
-        let stats_dir = save_dir
+    pub async fn read(instance_dir: &Path) -> Result<Option<Self>> {
+        let stats_dir = instance_dir
             .join("Nolla_Games_Noita")
             .join("save00")
             .join("stats");
