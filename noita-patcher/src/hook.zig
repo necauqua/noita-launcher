@@ -3,9 +3,9 @@ const std = @import("std");
 const Guid = @import("win32").zig.Guid;
 const win = @import("win32").everything;
 
-const InstallArgs = @import("shared.zig").InstallArgs;
+const shared = @import("shared.zig");
 
-pub const std_options = std.Options{ .logFn = @import("log.zig").mkLog("noita-path-hook") };
+pub const std_options = std.Options{ .logFn = shared.mkLog("noita-path-hook") };
 
 pub export fn DllMain(_: ?win.HINSTANCE, reason: u32, _: ?*anyopaque) callconv(.winapi) std.os.windows.BOOL {
     if (reason != win.DLL_PROCESS_ATTACH) {
@@ -25,9 +25,9 @@ pub export fn DllMain(_: ?win.HINSTANCE, reason: u32, _: ?*anyopaque) callconv(.
     return .TRUE;
 }
 
-var args: InstallArgs = undefined;
+var args: shared.InstallArgs = undefined;
 
-export fn install(_args: *InstallArgs) bool {
+export fn install(_args: *shared.InstallArgs) bool {
     args = _args.*;
     std.log.debug("hook install called; trampoline_path={f}, save_path={f}, dll_path={f}", .{
         args.trampoline_path,

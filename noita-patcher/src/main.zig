@@ -2,59 +2,9 @@ const std = @import("std");
 
 const win = @import("win32").everything;
 
-const InstallArgs = @import("shared.zig").InstallArgs;
+const shared = @import("shared.zig");
 
-/// Load the DLL locally to get the proc address and then rebase it on top of the remote base
-fn remoteProcAddress(dllPath: [*:0]const u16, module: win.HINSTANCE, procName: [*:0]const u8) ?*const anyopaque {
-    const local = win.LoadLibraryExW(dllPath, null, .{ .DONT_RESOLVE_DLL_REFERENCES = 1 }) orelse return null;
-    defer _ = win.FreeLibrary(local);
-
-    const localProc = win.GetProcAddress(local, procName) orelse return null;
-    const rva = @intFromPtr(localProc) - @intFromPtr(local);
-    return @ptrFromInt(@intFromPtr(module) + rva);
-}
-
-/// Runs a remote thread at `start` with a single pointer arg, waits, returns exit code.
-fn callRemote(proc: win.HANDLE, lpStartAddress: ?win.LPTHREAD_START_ROUTINE, lpParameter: ?*anyopaque) u32 {
-    const thread = win.CreateRemoteThread(proc, null, 0, lpStartAddress, lpParameter, 0, null) orelse {
-        fail("CreateRemoteThread");
-    };
-    defer _ = win.CloseHandle(thread);
-
-    if (win.WaitForSingleObject(thread, win.INFINITE) != .NO_ERROR) {
-        fail("WaitForSingleObject(remote thread)");
-    }
-
-    var exit_code: u32 = 0;
-    if (win.GetExitCodeThread(thread, &exit_code) == 0) {
-        fail("GetExitCodeThread");
-    }
-    return exit_code;
-}
-
-/// Calls LoadLibraryW(dll_path) in the target process
-fn loadLibraryRemote(proc: win.HANDLE, dll_path: [:0]const u16) !win.HINSTANCE {
-    const k32 = win.GetModuleHandleA("kernel32.dll") orelse {
-        return error.NoKernel32;
-    };
-    const loadLibrary = win.GetProcAddress(k32, "LoadLibraryW") orelse {
-        return error.NoLoadLibraryW;
-    };
-
-    var remoteArg = try RemoteMem.wstr(proc, dll_path);
-    defer remoteArg.deinit();
-
-    // All same-arch processes share the same kernel32 and so the LoadLibraryW
-    // address is the same as ours
-    const exit_code = callRemote(proc, @ptrCast(loadLibrary), remoteArg.ptr);
-    if (exit_code == 0) {
-        return error.LoadLibraryWFailed;
-    }
-    std.log.debug("injected hook DLL", .{});
-    return @ptrFromInt(exit_code); // this is quite meh and only works on 32-bit
-}
-
-pub const std_options = std.Options{ .logFn = @import("log.zig").mkLog("noita-trampoline") };
+pub const std_options = std.Options{ .logFn = shared.mkLog("noita-trampoline") };
 
 pub fn main(init: std.process.Init) void {
     win.ExitProcess(run(init) catch |e| fail(@errorName(e)));
@@ -112,7 +62,7 @@ fn run(init: std.process.Init) !u32 {
     const hookDllWide = try std.unicode.utf8ToUtf16LeAllocZ(arena, hookDll);
     const handle = try loadLibraryRemote(proc, hookDllWide);
 
-    const args = InstallArgs{
+    const args = shared.InstallArgs{
         .trampoline_path = try remotePath(arena, proc, trampolineExe),
         .save_path = try remotePath(arena, proc, savePath),
         .dll_path = try remotePath(arena, proc, hookDll),
@@ -147,6 +97,56 @@ fn run(init: std.process.Init) !u32 {
     }
     std.log.debug("noita.exe exited with code {d}", .{code});
     return code;
+}
+
+/// Load the DLL locally to get the proc address and then rebase it on top of the remote base
+fn remoteProcAddress(dllPath: [*:0]const u16, module: win.HINSTANCE, procName: [*:0]const u8) ?*const anyopaque {
+    const local = win.LoadLibraryExW(dllPath, null, .{ .DONT_RESOLVE_DLL_REFERENCES = 1 }) orelse return null;
+    defer _ = win.FreeLibrary(local);
+
+    const localProc = win.GetProcAddress(local, procName) orelse return null;
+    const rva = @intFromPtr(localProc) - @intFromPtr(local);
+    return @ptrFromInt(@intFromPtr(module) + rva);
+}
+
+/// Runs a remote thread at `start` with a single pointer arg, waits, returns exit code.
+fn callRemote(proc: win.HANDLE, lpStartAddress: ?win.LPTHREAD_START_ROUTINE, lpParameter: ?*anyopaque) u32 {
+    const thread = win.CreateRemoteThread(proc, null, 0, lpStartAddress, lpParameter, 0, null) orelse {
+        fail("CreateRemoteThread");
+    };
+    defer _ = win.CloseHandle(thread);
+
+    if (win.WaitForSingleObject(thread, win.INFINITE) != .NO_ERROR) {
+        fail("WaitForSingleObject(remote thread)");
+    }
+
+    var exit_code: u32 = 0;
+    if (win.GetExitCodeThread(thread, &exit_code) == 0) {
+        fail("GetExitCodeThread");
+    }
+    return exit_code;
+}
+
+/// Calls LoadLibraryW(dll_path) in the target process
+fn loadLibraryRemote(proc: win.HANDLE, dll_path: [:0]const u16) !win.HINSTANCE {
+    const k32 = win.GetModuleHandleA("kernel32.dll") orelse {
+        return error.NoKernel32;
+    };
+    const loadLibrary = win.GetProcAddress(k32, "LoadLibraryW") orelse {
+        return error.NoLoadLibraryW;
+    };
+
+    var remoteArg = try RemoteMem.wstr(proc, dll_path);
+    defer remoteArg.deinit();
+
+    // All same-arch processes share the same kernel32 and so the LoadLibraryW
+    // address is the same as ours
+    const exit_code = callRemote(proc, @ptrCast(loadLibrary), remoteArg.ptr);
+    if (exit_code == 0) {
+        return error.LoadLibraryWFailed;
+    }
+    std.log.debug("injected hook DLL", .{});
+    return @ptrFromInt(exit_code); // this is quite meh and only works on 32-bit
 }
 
 fn fail(msg: []const u8) noreturn {
